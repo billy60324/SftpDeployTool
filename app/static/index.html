@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Windows 本機 SFTP 檔案上傳工具</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- 頂部導覽列 -->
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="brand-icon" aria-hidden="true">SFTP</div>
+      <div>
+        <h1 class="brand-title">Windows 本機 SFTP 檔案上傳工具</h1>
+        <p class="brand-subtitle">本機瀏覽器管理介面 · 固定監聽 127.0.0.1:<span id="header-http-port">----</span></p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="active-job-indicator" class="status-pill status-running hidden">
+        <span class="pulse-dot"></span> 工作執行中
+      </span>
+      <button id="btn-shutdown" type="button" class="btn btn-danger-outline" title="安全關閉本機後端服務">
+        退出工具
+      </button>
+    </div>
+  </header>
+
+  <!-- 全域通知訊息 -->
+  <div id="global-toast" class="toast hidden" role="alert"></div>
+
+  <!-- 主導覽頁籤 -->
+  <nav class="tabs-nav" aria-label="主要功能選單">
+    <button type="button" class="tab-btn active" data-tab="tab-deploy">
+      1. 觸發佈署与進度
+    </button>
+    <button type="button" class="tab-btn" data-tab="tab-profiles">
+      2. 佈署設定管理
+    </button>
+    <button type="button" class="tab-btn" data-tab="tab-servers">
+      3. Server 設定管理
+    </button>
+    <button type="button" class="tab-btn" data-tab="tab-history">
+      4. 歷史佈署紀錄
+    </button>
+  </nav>
+
+  <main class="container">
+    <!-- ==================== Tab 1: 觸發佈署與執行進度 ==================== -->
+    <section id="tab-deploy" class="tab-panel active">
+      <div class="grid-two-col">
+        <!-- 左側：選擇佈署設定並觸發 -->
+        <div class="card">
+          <div class="card-header">
+            <h2>選擇佈署設定執行上傳</h2>
+            <button type="button" id="btn-refresh-deploy-list" class="btn btn-sm btn-secondary">重新整理</button>
+          </div>
+          <p class="text-muted">
+            請選擇要執行的佈署設定，檢視目標 Server 與檔案清單後點擊「準備佈署」。
+          </p>
+          <div id="deploy-profiles-quicklist" class="profile-cards-list">
+            <!-- 由 app.js 動態渲染 -->
+          </div>
+        </div>
+
+        <!-- 右側：即時工作進度與結果面板 -->
+        <div class="card">
+          <div class="card-header">
+            <h2>目前／最新工作執行進度與結果</h2>
+            <span id="job-panel-status-badge" class="status-pill status-neutral">尚無執行工作</span>
+          </div>
+
+          <!-- 紀錄保存失敗警告 (AC-27) -->
+          <div id="job-record-warning" class="alert alert-warning hidden">
+            <strong>紀錄保存失敗警告：</strong>
+            <span id="job-record-warning-text"></span>
+          </div>
+
+          <div id="job-progress-empty" class="empty-state">
+            <p>目前沒有正在執行的佈署工作。</p>
+            <p class="text-muted">由左側選擇一組佈署設定並確認後，將在此即時顯示逐檔上傳進度與結果。</p>
+          </div>
+
+          <div id="job-progress-content" class="hidden">
+            <div class="job-meta-grid">
+              <div><span class="meta-label">工作 ID：</span><code id="job-meta-id">-</code></div>
+              <div><span class="meta-label">佈署設定：</span><strong id="job-meta-profile">-</strong></div>
+              <div><span class="meta-label">目標 Server：</span><span id="job-meta-server">-</span></div>
+              <div><span class="meta-label">建立時間：</span><span id="job-meta-created">-</span></div>
+              <div><span class="meta-label">目前處理檔案：</span><code id="job-meta-current-file">-</code></div>
+              <div>
+                <span class="meta-label">已完成／總檔案數：</span>
+                <strong id="job-meta-progress-text">0 / 0</strong>
+                <span id="job-meta-counts-detail" class="text-muted"></span>
+              </div>
+            </div>
+
+            <div class="progress-bar-wrap">
+              <div id="job-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+            </div>
+
+            <h3 class="section-subhead">各檔案執行狀態與結果</h3>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th style="width: 48px">#</th>
+                    <th>本機來源 (localPath)</th>
+                    <th>遠端目標 (remotePath)</th>
+                    <th style="width: 100px">大小</th>
+                    <th style="width: 110px">狀態</th>
+                    <th>錯誤原因／時間</th>
+                  </tr>
+                </thead>
+                <tbody id="job-files-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== Tab 2: 佈署設定管理 ==================== -->
+    <section id="tab-profiles" class="tab-panel">
+      <div class="grid-two-col">
+        <!-- 左側：佈署設定清單 -->
+        <div class="card">
+          <div class="card-header">
+            <h2>佈署設定清單 (Deployment Profiles)</h2>
+            <button type="button" id="btn-new-profile" class="btn btn-primary">+ 新增佈署設定</button>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>名稱 / ID</th>
+                  <th>目標 Server</th>
+                  <th style="width: 85px">檔案數</th>
+                  <th style="width: 210px">操作</th>
+                </tr>
+              </thead>
+              <tbody id="profiles-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 右側：新增/編輯佈署設定表單 -->
+        <div class="card">
+          <div class="card-header">
+            <h2 id="profile-form-title">新增佈署設定</h2>
+            <button type="button" id="btn-reset-profile-form" class="btn btn-sm btn-secondary">清空重置</button>
+          </div>
+          <form id="profile-form" novalidate>
+            <input type="hidden" id="profile-id-input" />
+
+            <div class="form-group">
+              <label for="profile-name-input">佈署設定名稱 <span class="req">*</span></label>
+              <input type="text" id="profile-name-input" placeholder="例如：Test App 佈署" required />
+            </div>
+
+            <div class="form-group">
+              <label for="profile-server-select">目標 Server <span class="req">*</span></label>
+              <select id="profile-server-select" required>
+                <option value="">-- 請選擇 Server --</option>
+              </select>
+              <div id="selected-server-preview" class="info-box hidden"></div>
+            </div>
+
+            <div class="form-group">
+              <div class="flex-between">
+                <label>檔案對應清單 (依順序逐檔執行) <span class="req">*</span></label>
+                <button type="button" id="btn-add-file-row" class="btn btn-sm btn-secondary">+ 新增檔案對應</button>
+              </div>
+              <p class="form-hint">
+                localPath 須為 Windows 絕對檔案路徑（如 <code>C:\Build\App.dll</code>）；remotePath 須為以 <code>/</code> 開頭且包含檔名的 Linux 絕對路徑（如 <code>/opt/app/App.dll</code>）。
+              </p>
+              <div id="file-mappings-container" class="file-mappings-list"></div>
+            </div>
+
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">保存佈署設定</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== Tab 3: Server 設定管理 ==================== -->
+    <section id="tab-servers" class="tab-panel">
+      <div class="grid-two-col">
+        <!-- 左側：Server 清單 -->
+        <div class="card">
+          <div class="card-header">
+            <h2>Server 清單</h2>
+            <button type="button" id="btn-new-server" class="btn btn-primary">+ 新增 Server</button>
+          </div>
+          <p class="text-muted">
+            註：連線測試僅驗證能否建立 SFTP 連線及完成認證，不保證所有遠端目標路徑具有寫入權限。
+          </p>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>名稱 / ID</th>
+                  <th>連線位址 (Host:Port)</th>
+                  <th>帳號 / 密碼狀態</th>
+                  <th>被引用情況</th>
+                  <th style="width: 220px">操作</th>
+                </tr>
+              </thead>
+              <tbody id="servers-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 右側：新增/修改 Server 表單 -->
+        <div class="card">
+          <div class="card-header">
+            <h2 id="server-form-title">新增 Server</h2>
+            <button type="button" id="btn-reset-server-form" class="btn btn-sm btn-secondary">清空重置</button>
+          </div>
+          <form id="server-form" novalidate>
+            <input type="hidden" id="server-id-input" />
+
+            <div class="form-group">
+              <label for="server-name-input">Server 顯示名稱 <span class="req">*</span></label>
+              <input type="text" id="server-name-input" placeholder="例如：測試 Server 01" required />
+            </div>
+
+            <div class="form-row">
+              <div class="form-group flex-2">
+                <label for="server-host-input">Host (IP 或 Hostname) <span class="req">*</span></label>
+                <input type="text" id="server-host-input" placeholder="例如：192.168.10.50" required />
+              </div>
+              <div class="form-group flex-1">
+                <label for="server-port-input">SFTP Port <span class="req">*</span></label>
+                <input type="number" id="server-port-input" value="22" min="1" max="65535" required />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="server-username-input">登入帳號 (Username) <span class="req">*</span></label>
+              <input type="text" id="server-username-input" placeholder="例如：deploy" required />
+            </div>
+
+            <div class="form-group">
+              <label for="server-password-input">
+                登入密碼 (Password) <span id="server-password-req" class="req">*</span>
+              </label>
+              <input type="password" id="server-password-input" autocomplete="new-password" placeholder="輸入 SFTP 登入密碼" />
+              <p id="server-password-hint" class="form-hint">
+                密碼將以 UTF-8 Base64 編碼保存於本機 servers.json（注意：前後空白將完整保留，不會自動去除）。
+              </p>
+            </div>
+
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">保存 Server 設定</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== Tab 4: 歷史佈署紀錄 ==================== -->
+    <section id="tab-history" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <h2>歷史佈署工作紀錄</h2>
+          <div class="pagination-controls">
+            <button type="button" id="btn-history-prev" class="btn btn-sm btn-secondary">上一頁</button>
+            <span id="history-page-info" class="page-info">第 1 頁 / 共 1 頁（總計 0 筆）</span>
+            <button type="button" id="btn-history-next" class="btn btn-sm btn-secondary">下一頁</button>
+            <button type="button" id="btn-history-refresh" class="btn btn-sm btn-secondary">重新整理</button>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>工作 ID</th>
+                <th>佈署設定快照</th>
+                <th>Server 快照</th>
+                <th>建立時間 (UTC)</th>
+                <th>狀態</th>
+                <th>統計 (總/成/敗/斷)</th>
+                <th style="width: 110px">操作</th>
+              </tr>
+            </thead>
+            <tbody id="history-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 單次歷史工作明細檢視區 -->
+      <div id="history-detail-card" class="card hidden" style="margin-top: 16px;">
+        <div class="card-header">
+          <h2>歷史工作詳細紀錄：<code id="history-detail-jobid">-</code></h2>
+          <button type="button" id="btn-close-history-detail" class="btn btn-sm btn-secondary">關閉明細</button>
+        </div>
+        <div id="history-detail-meta" class="job-meta-grid"></div>
+        <div class="table-responsive" style="margin-top: 12px;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width: 48px">#</th>
+                <th>檔案 ID</th>
+                <th>本機來源 (localPath)</th>
+                <th>遠端目標 (remotePath)</th>
+                <th style="width: 100px">大小</th>
+                <th style="width: 110px">狀態</th>
+                <th>執行時間与錯誤資訊</th>
+              </tr>
+            </thead>
+            <tbody id="history-detail-files-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ==================== 確認佈署 Modal (SPEC 11.3) ==================== -->
+  <div id="confirm-deploy-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="confirm-modal-title">確認執行 SFTP 檔案佈署</h2>
+        <button type="button" id="btn-close-confirm-modal" class="btn-icon" aria-label="關閉">&times;</button>
+      </div>
+      <div class="modal-body">
+        <!-- SPEC 11.3 強制警告文字 -->
+        <div class="alert alert-danger">
+          <strong>警告：</strong>目標檔案已存在時將直接覆蓋，不建立備份。上傳中斷可能留下不完整檔案。
+        </div>
+
+        <div class="confirm-summary-grid">
+          <div><span class="meta-label">佈署設定名稱：</span><strong id="confirm-profile-name">-</strong></div>
+          <div><span class="meta-label">Server 名稱：</span><strong id="confirm-server-name">-</strong></div>
+          <div><span class="meta-label">Server Host / Port：</span><code id="confirm-server-hostport">-</code></div>
+          <div><span class="meta-label">登入帳號：</span><code id="confirm-server-user">-</code></div>
+          <div><span class="meta-label">上傳檔案總數：</span><strong id="confirm-file-count">0</strong> 筆</div>
+        </div>
+
+        <h3 class="section-subhead">即將依序上傳之檔案清單：</h3>
+        <div class="table-responsive modal-file-list">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width: 48px">順序</th>
+                <th>本機來源 (localPath)</th>
+                <th>遠端目標 (remotePath)</th>
+              </tr>
+            </thead>
+            <tbody id="confirm-files-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="btn-cancel-deploy" class="btn btn-secondary">取消</button>
+        <button type="button" id="btn-confirm-deploy" class="btn btn-primary">確認並開始上傳</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

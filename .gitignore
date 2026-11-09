@@ -1,0 +1,30 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# PyInstaller & Release build artifacts
+release/
+dist/
+build/
+*.spec
+
+# Local runtime configuration & sensitive server credentials
+appsettings.json
+servers.json
+deployments.json
+*.bak
+*.tmp
+logs/
+
+# OS & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

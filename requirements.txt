@@ -1,0 +1,7 @@
+fastapi>=0.138.0
+uvicorn>=0.49.0
+pydantic>=2.13.4
+paramiko>=3.4.0
+pyinstaller>=6.22.2
+pytest>=8.0.0
+httpx>=0.27.0
