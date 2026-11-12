@@ -116,3 +116,7 @@ pytest -v
 python build_release.py
 ```
 
+### 4.5 版本規格與開發計畫文件
+各版本之系統規格書（`SPEC.md`）與實作計畫（`IMPLEMENTATION_PLAN.md`）依版本號歸檔於 [`docs/`](./docs/) 目錄下（例如初版文件位於 [`docs/v1.0.0/`](./docs/v1.0.0/)）。
+
+
