@@ -1,4 +1,4 @@
-"""FastAPI 路由、統一錯誤處理與內嵌靜態前端資源服務 (SPEC 15, 16, 17)。"""
+"""FastAPI 路由、統一錯誤處理與內嵌靜態前端資源服務 (SPEC v1.1.0)。"""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from app.job_manager import JobManager
 from app.paths import get_base_dir, get_static_dir
 from app.sftp_client import test_sftp_server_connection
 from app.storage import ConfigStore
+from app.weblogic_client import test_weblogic_server_connection
 
 
 async def _parse_json_body(request: Request) -> dict[str, Any]:
@@ -52,6 +53,7 @@ def create_app(
     config_store: Optional[ConfigStore] = None,
     job_manager: Optional[JobManager] = None,
     connection_tester: Optional[Callable[..., dict[str, str]]] = None,
+    weblogic_tester: Optional[Callable[..., dict[str, Any]]] = None,
     shutdown_callback: Optional[Callable[[], None]] = None,
 ) -> FastAPI:
     """建立並初始化 FastAPI 應用程式實例。"""
@@ -65,10 +67,11 @@ def create_app(
         jobs.recover_interrupted_jobs_on_startup()
 
     tester = connection_tester or test_sftp_server_connection
+    wl_tester = weblogic_tester or test_weblogic_server_connection
 
     app = FastAPI(
         title="Windows 本機 SFTP 檔案上傳工具",
-        version="1.0.0",
+        version="1.1.0",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -134,6 +137,25 @@ def create_app(
 
         return {"status": "SHUTTING_DOWN", "message": "本機服務即將關閉。"}
 
+    # -------------------- 設定檔匯出與匯入 API (SPEC v1.1.0 第 8 章) --------------------
+
+    @app.get("/api/config/export")
+    async def export_config() -> dict[str, Any]:
+        return store.export_config()
+
+    @app.post("/api/config/import")
+    async def import_config(request: Request) -> dict[str, Any]:
+        active_id = jobs.get_active_job_id()
+        if active_id is not None:
+            raise AppError(
+                ErrorCode.DEPLOYMENT_ALREADY_RUNNING,
+                "目前仍有佈署工作正在執行中，請等待工作完成後再匯入設定。",
+                status_code=409,
+                details={"jobId": active_id},
+            )
+        payload = await _parse_json_body(request)
+        return store.import_config(payload)
+
     # -------------------- Server 管理 API --------------------
 
     @app.get("/api/servers")
@@ -163,6 +185,18 @@ def create_app(
             port=srv["port"],
             username=srv["username"],
             password=srv["password"],
+        )
+        return res
+
+    @app.post("/api/servers/{server_id}/test-weblogic")
+    async def test_server_weblogic(server_id: str) -> dict[str, Any]:
+        srv = store.get_server_with_credentials(server_id)
+        wl = srv.get("weblogic") or {}
+        res = wl_tester(
+            admin_url=wl.get("adminUrl", ""),
+            username=wl.get("username", ""),
+            password=wl.get("password", ""),
+            rest_version=wl.get("restVersion", "12.2.1.3.0"),
         )
         return res
 

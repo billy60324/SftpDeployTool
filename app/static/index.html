@@ -20,6 +20,12 @@
       <span id="active-job-indicator" class="status-pill status-running hidden">
         <span class="pulse-dot"></span> 工作執行中
       </span>
+      <button id="btn-export-config" type="button" class="btn btn-topbar" title="將所有 Server 與佈署設定匯出為單一 JSON 備份檔">
+        匯出設定
+      </button>
+      <button id="btn-open-import-modal" type="button" class="btn btn-topbar" title="從 JSON 備份檔匯入 Server 與佈署設定">
+        匯入設定
+      </button>
       <button id="btn-shutdown" type="button" class="btn btn-danger-outline" title="安全關閉本機後端服務">
         退出工具
       </button>
@@ -32,7 +38,7 @@
   <!-- 主導覽頁籤 -->
   <nav class="tabs-nav" aria-label="主要功能選單">
     <button type="button" class="tab-btn active" data-tab="tab-deploy">
-      1. 觸發佈署与進度
+      1. 觸發佈署與進度
     </button>
     <button type="button" class="tab-btn" data-tab="tab-profiles">
       2. 佈署設定管理
@@ -115,6 +121,16 @@
                 <tbody id="job-files-tbody"></tbody>
               </table>
             </div>
+
+            <!-- WebLogic Redeploy 執行進度與日誌區塊 -->
+            <div id="job-weblogic-section" class="weblogic-result-panel hidden">
+              <div class="flex-between" style="margin-bottom: 8px;">
+                <h3 class="section-subhead" style="margin: 0;">WebLogic AP Redeploy 狀態與執行日誌</h3>
+                <span id="job-weblogic-status-badge"></span>
+              </div>
+              <div id="job-weblogic-meta" class="info-box" style="margin-top: 0; margin-bottom: 8px;"></div>
+              <div id="job-weblogic-log" class="wl-terminal-log"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -134,7 +150,7 @@
               <thead>
                 <tr>
                   <th>名稱 / ID</th>
-                  <th>目標 Server</th>
+                  <th>目標 Server / WebLogic</th>
                   <th style="width: 85px">檔案數</th>
                   <th style="width: 210px">操作</th>
                 </tr>
@@ -172,9 +188,53 @@
                 <button type="button" id="btn-add-file-row" class="btn btn-sm btn-secondary">+ 新增檔案對應</button>
               </div>
               <p class="form-hint">
-                localPath 須為 Windows 絕對檔案路徑（如 <code>C:\Build\App.dll</code>）；remotePath 須為以 <code>/</code> 開頭且包含檔名的 Linux 絕對路徑（如 <code>/opt/app/App.dll</code>）。
+                localPath 須為 Windows 絕對檔案路徑；remotePath 須為以 <code>/</code> 開頭且包含檔名的 Linux 絕對路徑。
               </p>
               <div id="file-mappings-container" class="file-mappings-list"></div>
+            </div>
+
+            <!-- WebLogic Redeploy 設定區塊 (SPEC v1.1.0 第 6 章) -->
+            <div class="sub-panel">
+              <label class="checkbox-label">
+                <input type="checkbox" id="profile-wl-enabled" />
+                <span>SFTP 全部上傳成功後，自動觸發重新啟動 WebLogic AP (Redeploy)</span>
+              </label>
+              <p class="form-hint" style="margin-top: 2px;">
+                適用於佈署 WebLogic EAR/WAR 檔後自動重啟對應 AP。唯有當所有檔案皆上傳成功時才會觸發。
+              </p>
+
+              <div id="profile-wl-fields" class="hidden" style="margin-top: 12px;">
+                <div class="form-row">
+                  <div class="form-group flex-1">
+                    <label for="profile-wl-app">AP 名稱 <small class="text-muted">（appDeployments 名稱）</small> <span class="req">*</span></label>
+                    <input type="text" id="profile-wl-app" placeholder="例如：PMCForcastSystemEAR_7015" autocomplete="off" />
+                  </div>
+                  <div class="form-group flex-1">
+                    <label for="profile-wl-targets">Targets <small class="text-muted">（選填，逗號分隔；留空＝沿用現有）</small></label>
+                    <input type="text" id="profile-wl-targets" placeholder="例如：AdminServer,Cluster1" autocomplete="off" />
+                  </div>
+                </div>
+
+                <details class="advanced-details">
+                  <summary>WebLogic Redeploy 進階設定</summary>
+                  <div class="details-body">
+                    <div class="form-row">
+                      <div class="form-group flex-1">
+                        <label for="profile-wl-timeout">等待逾時（秒）</label>
+                        <input type="number" id="profile-wl-timeout" value="300" min="10" max="3600" />
+                      </div>
+                      <div class="form-group flex-2">
+                        <label for="profile-wl-path">Redeploy API 路徑 <small class="text-muted">（{version}、{app} 自動取代）</small></label>
+                        <input type="text" id="profile-wl-path" value="/management/weblogic/{version}/edit/appDeployments/{app}/redeploy" />
+                      </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0;">
+                      <label for="profile-wl-body">Request Body（JSON）<small class="text-muted">（留空則依 Targets 自動產生，無 Targets 則送 {}）</small></label>
+                      <textarea id="profile-wl-body" rows="2" placeholder='{"targets":["Server1"]}'></textarea>
+                    </div>
+                  </div>
+                </details>
+              </div>
             </div>
 
             <div class="form-actions">
@@ -195,17 +255,17 @@
             <button type="button" id="btn-new-server" class="btn btn-primary">+ 新增 Server</button>
           </div>
           <p class="text-muted">
-            註：連線測試僅驗證能否建立 SFTP 連線及完成認證，不保證所有遠端目標路徑具有寫入權限。
+            註：SFTP 連線測試僅驗證能否建立連線及完成認證；若已設定 WebLogic Admin，亦可直接點選「測試 WebLogic」。
           </p>
           <div class="table-responsive">
-            <table class="data-table">
+            <table class="data-table servers-table">
               <thead>
                 <tr>
-                  <th>名稱 / ID</th>
-                  <th>連線位址 (Host:Port)</th>
-                  <th>帳號 / 密碼狀態</th>
-                  <th>被引用情況</th>
-                  <th style="width: 220px">操作</th>
+                  <th style="min-width: 120px">名稱 / ID</th>
+                  <th style="min-width: 145px">連線位址 (SFTP / WebLogic)</th>
+                  <th style="min-width: 165px">帳號 / 密碼狀態</th>
+                  <th style="min-width: 110px">被引用情況</th>
+                  <th style="min-width: 210px">操作</th>
                 </tr>
               </thead>
               <tbody id="servers-tbody"></tbody>
@@ -229,7 +289,7 @@
 
             <div class="form-row">
               <div class="form-group flex-2">
-                <label for="server-host-input">Host (IP 或 Hostname) <span class="req">*</span></label>
+                <label for="server-host-input">SFTP Host (IP 或 Hostname) <span class="req">*</span></label>
                 <input type="text" id="server-host-input" placeholder="例如：192.168.10.50" required />
               </div>
               <div class="form-group flex-1">
@@ -239,17 +299,48 @@
             </div>
 
             <div class="form-group">
-              <label for="server-username-input">登入帳號 (Username) <span class="req">*</span></label>
+              <label for="server-username-input">SFTP 登入帳號 (Username) <span class="req">*</span></label>
               <input type="text" id="server-username-input" placeholder="例如：deploy" required />
             </div>
 
             <div class="form-group">
               <label for="server-password-input">
-                登入密碼 (Password) <span id="server-password-req" class="req">*</span>
+                SFTP 登入密碼 (Password) <span id="server-password-req" class="req">*</span>
               </label>
               <input type="password" id="server-password-input" autocomplete="new-password" placeholder="輸入 SFTP 登入密碼" />
               <p id="server-password-hint" class="form-hint">
                 密碼將以 UTF-8 Base64 編碼保存於本機 servers.json（注意：前後空白將完整保留，不會自動去除）。
+              </p>
+            </div>
+
+            <!-- WebLogic Admin 連線設定區塊 (SPEC v1.1.0 第 5 章) -->
+            <div class="sub-panel">
+              <div class="sub-panel-title">WebLogic Admin Server 連線設定（選填，供 EAR/AP 重啟使用）</div>
+              <p class="form-hint" style="margin-bottom: 10px;">
+                若此 Server 需搭配「上傳後觸發 WebLogic Redeploy」，請填寫以下 WebLogic Management REST API 連線資訊（不需使用可留空）。
+              </p>
+              <div class="form-row">
+                <div class="form-group flex-2">
+                  <label for="server-wl-url-input">Admin Server URL <small class="text-muted">（含 http 或 https）</small></label>
+                  <input type="text" id="server-wl-url-input" placeholder="例如：fa5edapb:7001（請加 http 或 https 前綴）" autocomplete="off" />
+                </div>
+                <div class="form-group flex-1">
+                  <label for="server-wl-ver-input">REST 版本</label>
+                  <input type="text" id="server-wl-ver-input" value="12.2.1.3.0" placeholder="12.2.1.3.0 或 latest" />
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group flex-1" style="margin-bottom: 0;">
+                  <label for="server-wl-user-input">WebLogic 帳號</label>
+                  <input type="text" id="server-wl-user-input" placeholder="例如：system" autocomplete="off" />
+                </div>
+                <div class="form-group flex-1" style="margin-bottom: 0;">
+                  <label for="server-wl-password-input">WebLogic 密碼</label>
+                  <input type="password" id="server-wl-password-input" autocomplete="new-password" placeholder="輸入 WebLogic 密碼（Base64 保存）" />
+                </div>
+              </div>
+              <p id="server-wl-password-hint" class="form-hint">
+                填寫 Admin Server URL 時，WebLogic 帳號與密碼為必填。
               </p>
             </div>
 
@@ -280,9 +371,9 @@
                 <th>工作 ID</th>
                 <th>佈署設定快照</th>
                 <th>Server 快照</th>
-                <th>建立時間 (UTC)</th>
+                <th>建立時間</th>
                 <th>狀態</th>
-                <th>統計 (總/成/敗/斷)</th>
+                <th>統計 (總/成/敗/斷) · WebLogic</th>
                 <th style="width: 110px">操作</th>
               </tr>
             </thead>
@@ -308,11 +399,21 @@
                 <th>遠端目標 (remotePath)</th>
                 <th style="width: 100px">大小</th>
                 <th style="width: 110px">狀態</th>
-                <th>執行時間与錯誤資訊</th>
+                <th>執行時間與錯誤資訊</th>
               </tr>
             </thead>
             <tbody id="history-detail-files-tbody"></tbody>
           </table>
+        </div>
+
+        <!-- 歷史明細內的 WebLogic Redeploy 日誌區塊 -->
+        <div id="history-detail-weblogic-section" class="weblogic-result-panel hidden">
+          <div class="flex-between" style="margin-bottom: 8px;">
+            <h3 class="section-subhead" style="margin: 0;">WebLogic AP Redeploy 紀錄與執行日誌</h3>
+            <span id="history-detail-weblogic-badge"></span>
+          </div>
+          <div id="history-detail-weblogic-meta" class="info-box" style="margin-top: 0; margin-bottom: 8px;"></div>
+          <div id="history-detail-weblogic-log" class="wl-terminal-log"></div>
         </div>
       </div>
     </section>
@@ -331,12 +432,18 @@
           <strong>警告：</strong>目標檔案已存在時將直接覆蓋，不建立備份。上傳中斷可能留下不完整檔案。
         </div>
 
+        <div id="confirm-weblogic-notice" class="alert alert-warning hidden">
+          <strong>WebLogic AP 自動重啟已啟用：</strong><br />
+          當上述檔案全部 SFTP 上傳成功後，將自動對 <code id="confirm-wl-url">-</code> 的 AP「<strong id="confirm-wl-app">-</strong>」執行 Redeploy（此動作會影響線上服務）。
+        </div>
+
         <div class="confirm-summary-grid">
           <div><span class="meta-label">佈署設定名稱：</span><strong id="confirm-profile-name">-</strong></div>
           <div><span class="meta-label">Server 名稱：</span><strong id="confirm-server-name">-</strong></div>
           <div><span class="meta-label">Server Host / Port：</span><code id="confirm-server-hostport">-</code></div>
           <div><span class="meta-label">登入帳號：</span><code id="confirm-server-user">-</code></div>
           <div><span class="meta-label">上傳檔案總數：</span><strong id="confirm-file-count">0</strong> 筆</div>
+          <div><span class="meta-label">WebLogic Redeploy：</span><span id="confirm-wl-summary">未啟用</span></div>
         </div>
 
         <h3 class="section-subhead">即將依序上傳之檔案清單：</h3>
@@ -356,6 +463,45 @@
       <div class="modal-footer">
         <button type="button" id="btn-cancel-deploy" class="btn btn-secondary">取消</button>
         <button type="button" id="btn-confirm-deploy" class="btn btn-primary">確認並開始上傳</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 匯入設定檔 Modal (SPEC v1.1.0 第 8 章) ==================== -->
+  <div id="import-config-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="import-modal-title">
+    <div class="modal-dialog" style="max-width: 560px;">
+      <div class="modal-header">
+        <h2 id="import-modal-title">匯入設定檔 (Servers &amp; Deployment Profiles)</h2>
+        <button type="button" id="btn-close-import-modal" class="btn-icon" aria-label="關閉">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="import-file-input">選擇設定備份檔 (.json) <span class="req">*</span></label>
+          <input type="file" id="import-file-input" accept=".json,application/json" />
+          <p class="form-hint">支援由本工具匯出的整合設定檔（相容 v1.0.0 與 v1.1.0 格式）。</p>
+        </div>
+
+        <div class="form-group" style="margin-bottom: 0;">
+          <label>選擇匯入策略 <span class="req">*</span></label>
+          <label class="radio-option">
+            <input type="radio" name="import-mode-radio" value="merge" checked />
+            <div>
+              <strong>合併模式 (Merge - 推薦)</strong>
+              <div class="text-muted" style="font-size: 12px;">保留現有設定；若遇相同 ID 則以匯入檔更新，新 ID 則自動新增。</div>
+            </div>
+          </label>
+          <label class="radio-option">
+            <input type="radio" name="import-mode-radio" value="overwrite" />
+            <div>
+              <strong class="text-danger">整批覆蓋現有設定 (Overwrite)</strong>
+              <div class="text-muted" style="font-size: 12px;">以匯入檔完整替換本機所有 Server 與佈署設定（原檔案會自動備份為 .bak）。</div>
+            </div>
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="btn-cancel-import" class="btn btn-secondary">取消</button>
+        <button type="button" id="btn-confirm-import" class="btn btn-primary">執行匯入</button>
       </div>
     </div>
   </div>

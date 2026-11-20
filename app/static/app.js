@@ -1,6 +1,8 @@
 "use strict";
 
 (function () {
+  const DEFAULT_WL_PATH = "/management/weblogic/{version}/edit/appDeployments/{app}/redeploy";
+
   // 全域狀態
   const state = {
     servers: [],
@@ -54,6 +56,8 @@
       RUNNING: { cls: "status-running", label: "RUNNING (執行中)" },
       UPLOADING: { cls: "status-running", label: "UPLOADING (上傳中)" },
       PENDING: { cls: "status-neutral", label: "PENDING (待處理)" },
+      DISABLED: { cls: "status-neutral", label: "DISABLED (未啟用)" },
+      SKIPPED: { cls: "status-partial", label: "SKIPPED (已略過)" },
       SUCCEEDED: { cls: "status-succeeded", label: "SUCCEEDED (成功)" },
       PARTIALLY_SUCCEEDED: { cls: "status-partial", label: "PARTIALLY_SUCCEEDED (部分成功)" },
       FAILED: { cls: "status-failed", label: "FAILED (失敗)" },
@@ -61,6 +65,19 @@
     };
     const item = map[status] || { cls: "status-neutral", label: status || "-" };
     return `<span class="status-pill ${item.cls}">${escapeHtml(item.label)}</span>`;
+  }
+
+  function renderWeblogicLogsHtml(logs) {
+    if (!Array.isArray(logs) || logs.length === 0) {
+      return `<div class="dim">尚無執行日誌...</div>`;
+    }
+    return logs
+      .map((entry) => {
+        const cls = escapeHtml(entry.level || "info");
+        const timeStr = entry.time ? `[${escapeHtml(entry.time)}] ` : "";
+        return `<div class="${cls}">${timeStr}${escapeHtml(entry.message || "")}</div>`;
+      })
+      .join("");
   }
 
   async function apiRequest(method, url, body = null) {
@@ -144,7 +161,7 @@
     }
   }
 
-  // -------------------- Server 管理 (SPEC 11.1) --------------------
+  // -------------------- Server 管理 (SPEC 11.1 & v1.1.0 第 5 章) --------------------
 
   function renderServersTable() {
     const tbody = document.getElementById("servers-tbody");
@@ -163,8 +180,22 @@
             ? refs.map((r) => `<span class="status-pill status-neutral">${escapeHtml(r.name)}</span>`).join(" ")
             : `<span class="text-muted">未被引用</span>`;
         const pwHtml = srv.hasPassword
-          ? `<span class="status-pill status-succeeded">已設定密碼</span>`
-          : `<span class="status-pill status-failed">未設定密碼</span>`;
+          ? `<span class="status-pill status-succeeded">SFTP 已設密碼</span>`
+          : `<span class="status-pill status-failed">SFTP 未設密碼</span>`;
+
+        const wl = srv.weblogic || {};
+        const wlConfigured = Boolean(wl.configured);
+        const wlAddrHtml = wlConfigured
+          ? `<div style="margin-top:4px; font-size:12px;"><span class="text-muted">WL:</span> <code>${escapeHtml(wl.adminUrl)}</code></div>`
+          : `<div style="margin-top:4px; font-size:12px;" class="text-muted">WL: 未設定</div>`;
+
+        const wlUserHtml = wlConfigured
+          ? `<div style="margin-top:6px;"><code>${escapeHtml(wl.username)}</code> <span class="status-pill status-succeeded">WL 已設密碼</span></div>`
+          : "";
+
+        const testWlBtnHtml = wlConfigured
+          ? `<button type="button" class="btn btn-sm btn-secondary" data-action="test-weblogic" data-id="${escapeHtml(srv.id)}">測試 WebLogic</button>`
+          : "";
 
         return `
           <tr>
@@ -172,15 +203,19 @@
               <strong>${escapeHtml(srv.name)}</strong><br/>
               <code>${escapeHtml(srv.id)}</code>
             </td>
-            <td><code>${escapeHtml(srv.host)}:${escapeHtml(srv.port)}</code></td>
             <td>
-              <div><code>${escapeHtml(srv.username)}</code></div>
-              <div style="margin-top:4px;">${pwHtml}</div>
+              <div><span class="text-muted" style="font-size:12px;">SFTP:</span> <code>${escapeHtml(srv.host)}:${escapeHtml(srv.port)}</code></div>
+              ${wlAddrHtml}
+            </td>
+            <td>
+              <div><code>${escapeHtml(srv.username)}</code> ${pwHtml}</div>
+              ${wlUserHtml}
             </td>
             <td>${refsHtml}</td>
             <td>
               <div style="display:flex; gap:6px; flex-wrap:wrap;">
-                <button type="button" class="btn btn-sm btn-secondary" data-action="test-server" data-id="${escapeHtml(srv.id)}">測試連線</button>
+                <button type="button" class="btn btn-sm btn-secondary" data-action="test-server" data-id="${escapeHtml(srv.id)}">測試 SFTP</button>
+                ${testWlBtnHtml}
                 <button type="button" class="btn btn-sm btn-secondary" data-action="edit-server" data-id="${escapeHtml(srv.id)}">編輯</button>
                 <button type="button" class="btn btn-sm btn-danger" data-action="delete-server" data-id="${escapeHtml(srv.id)}">刪除</button>
               </div>
@@ -198,27 +233,50 @@
     document.getElementById("server-port-input").value = "22";
     document.getElementById("server-username-input").value = "";
     document.getElementById("server-password-input").value = "";
+    document.getElementById("server-wl-url-input").value = "";
+    document.getElementById("server-wl-ver-input").value = "12.2.1.3.0";
+    document.getElementById("server-wl-user-input").value = "";
+    document.getElementById("server-wl-password-input").value = "";
     document.getElementById("server-form-title").textContent = "新增 Server";
     document.getElementById("server-password-req").classList.remove("hidden");
     document.getElementById("server-password-input").placeholder = "輸入 SFTP 登入密碼";
     document.getElementById("server-password-hint").textContent =
       "密碼將以 UTF-8 Base64 編碼保存於本機 servers.json（注意：前後空白將完整保留，不會自動去除）。";
+    document.getElementById("server-wl-password-input").placeholder = "輸入 WebLogic 密碼（Base64 保存）";
+    document.getElementById("server-wl-password-hint").textContent =
+      "填寫 Admin Server URL 時，WebLogic 帳號與密碼為必填。";
   }
 
   function editServerForm(serverId) {
     const srv = state.servers.find((s) => s.id === serverId);
     if (!srv) return;
+    const wl = srv.weblogic || {};
     document.getElementById("server-id-input").value = srv.id;
     document.getElementById("server-name-input").value = srv.name;
     document.getElementById("server-host-input").value = srv.host;
     document.getElementById("server-port-input").value = srv.port;
     document.getElementById("server-username-input").value = srv.username;
     document.getElementById("server-password-input").value = "";
+    document.getElementById("server-wl-url-input").value = wl.adminUrl || "";
+    document.getElementById("server-wl-ver-input").value = wl.restVersion || "12.2.1.3.0";
+    document.getElementById("server-wl-user-input").value = wl.username || "";
+    document.getElementById("server-wl-password-input").value = "";
+
     document.getElementById("server-form-title").textContent = `修改 Server (${srv.id})`;
     document.getElementById("server-password-req").classList.add("hidden");
     document.getElementById("server-password-input").placeholder = "留空表示保留原密碼；輸入新值則替換密碼";
     document.getElementById("server-password-hint").textContent =
-      "修改時若不變更密碼，請保持密碼欄空白；若輸入新密碼將替換原密碼。";
+      "修改時若不變更 SFTP 密碼，請保持密碼欄空白；若輸入新密碼將替換原密碼。";
+
+    if (wl.hasPassword) {
+      document.getElementById("server-wl-password-input").placeholder = "留空表示保留原 WebLogic 密碼；輸入新值則替換";
+      document.getElementById("server-wl-password-hint").textContent =
+        "此 Server 已設定 WebLogic 密碼；留空將保留原密碼，輸入新值則更新。";
+    } else {
+      document.getElementById("server-wl-password-input").placeholder = "輸入 WebLogic 密碼（Base64 保存）";
+      document.getElementById("server-wl-password-hint").textContent =
+        "填寫 Admin Server URL 時，WebLogic 帳號與密碼為必填。";
+    }
   }
 
   async function handleServerFormSubmit(e) {
@@ -231,19 +289,32 @@
     // 注意：依 SPEC 8.2 密碼不得自動去除前後空白
     const passwordRaw = document.getElementById("server-password-input").value;
 
+    const wlUrl = document.getElementById("server-wl-url-input").value.trim();
+    const wlVer = document.getElementById("server-wl-ver-input").value.trim() || "12.2.1.3.0";
+    const wlUser = document.getElementById("server-wl-user-input").value.trim();
+    const wlPasswordRaw = document.getElementById("server-wl-password-input").value;
+
     const port = portStr ? Number(portStr) : 22;
+    const weblogicPayload = {
+      adminUrl: wlUrl,
+      username: wlUser,
+      restVersion: wlVer,
+    };
+    if (wlPasswordRaw.length > 0) {
+      weblogicPayload.password = wlPasswordRaw;
+    }
+
     const payload = {
       name,
       host,
       port,
       username,
+      weblogic: weblogicPayload,
     };
 
     if (!id) {
-      // 新增時必填 password
       payload.password = passwordRaw;
     } else if (passwordRaw.length > 0) {
-      // 修改時僅在有輸入新密碼時傳入 password
       payload.password = passwordRaw;
     }
 
@@ -273,7 +344,25 @@
       );
       showToast(res.message || "SFTP 連線測試成功！");
     } catch (err) {
-      showToast("連線測試失敗：" + err.message, true);
+      showToast("SFTP 連線測試失敗：" + err.message, true);
+    } finally {
+      btnEl.disabled = false;
+      btnEl.textContent = origText;
+    }
+  }
+
+  async function handleTestWeblogicConnection(serverId, btnEl) {
+    const origText = btnEl.textContent;
+    btnEl.disabled = true;
+    btnEl.textContent = "測試中...";
+    try {
+      const res = await apiRequest(
+        "POST",
+        `/api/servers/${encodeURIComponent(serverId)}/test-weblogic`
+      );
+      showToast(res.message || "WebLogic 連線測試成功！");
+    } catch (err) {
+      showToast("WebLogic 連線測試失敗：" + err.message, true);
     } finally {
       btnEl.disabled = false;
       btnEl.textContent = origText;
@@ -298,7 +387,7 @@
     }
   }
 
-  // -------------------- 佈署設定管理 (SPEC 11.2) --------------------
+  // -------------------- 佈署設定管理 (SPEC 11.2 & v1.1.0 第 6 章) --------------------
 
   function renderProfileServerSelect() {
     const sel = document.getElementById("profile-server-select");
@@ -328,13 +417,28 @@
       preview.innerHTML = "";
       return;
     }
+    const wl = srv.weblogic || {};
+    const wlInfo = wl.configured
+      ? `<div style="margin-top:4px;"><span class="text-muted">WebLogic Admin：</span><code>${escapeHtml(wl.adminUrl)}</code> · 帳號: <code>${escapeHtml(wl.username)}</code> · REST: <code>${escapeHtml(wl.restVersion)}</code></div>`
+      : `<div style="margin-top:4px;" class="text-muted">WebLogic Admin：此 Server 尚未設定 WebLogic 連線資訊（若需啟用自動 Redeploy 請先至 Server 管理設定）</div>`;
+
     preview.classList.remove("hidden");
     preview.innerHTML = `
-      <strong>選定 Server 資訊：</strong>
-      Host: <code>${escapeHtml(srv.host)}</code> ·
-      Port: <code>${escapeHtml(srv.port)}</code> ·
-      帳號: <code>${escapeHtml(srv.username)}</code>
+      <div>
+        <strong>選定 Server 資訊：</strong>
+        SFTP: <code>${escapeHtml(srv.host)}:${escapeHtml(srv.port)}</code> ·
+        帳號: <code>${escapeHtml(srv.username)}</code>
+      </div>
+      ${wlInfo}
     `;
+  }
+
+  function toggleProfileWeblogicFields() {
+    const enabled = document.getElementById("profile-wl-enabled").checked;
+    const fieldsEl = document.getElementById("profile-wl-fields");
+    if (fieldsEl) {
+      fieldsEl.classList.toggle("hidden", !enabled);
+    }
   }
 
   function syncDraftsFromInputs() {
@@ -374,11 +478,11 @@
             <div class="file-mapping-inputs">
               <div>
                 <label style="font-size:12px;">本機檔案絕對路徑 (localPath)</label>
-                <input type="text" class="input-local-path" value="${escapeHtml(item.localPath)}" placeholder="例如：C:\\Build\\App.dll" />
+                <input type="text" class="input-local-path" value="${escapeHtml(item.localPath)}" placeholder="例如：C:\\Build\\App.ear" />
               </div>
               <div>
                 <label style="font-size:12px;">遠端目標絕對路徑 (remotePath)</label>
-                <input type="text" class="input-remote-path" value="${escapeHtml(item.remotePath)}" placeholder="例如：/opt/app/App.dll" />
+                <input type="text" class="input-remote-path" value="${escapeHtml(item.remotePath)}" placeholder="例如：/opt/app/App.ear" />
               </div>
             </div>
           </div>
@@ -392,6 +496,14 @@
     document.getElementById("profile-name-input").value = "";
     document.getElementById("profile-server-select").value = "";
     document.getElementById("profile-form-title").textContent = "新增佈署設定";
+    document.getElementById("profile-wl-enabled").checked = false;
+    document.getElementById("profile-wl-app").value = "";
+    document.getElementById("profile-wl-targets").value = "";
+    document.getElementById("profile-wl-timeout").value = "300";
+    document.getElementById("profile-wl-path").value = DEFAULT_WL_PATH;
+    document.getElementById("profile-wl-body").value = "";
+    toggleProfileWeblogicFields();
+
     state.fileDrafts = [{ id: "", localPath: "", remotePath: "" }];
     updateSelectedServerPreview();
     renderFileMappingsDrafts();
@@ -400,10 +512,20 @@
   function editProfileForm(profileId) {
     const prof = state.profiles.find((p) => p.id === profileId);
     if (!prof) return;
+    const wl = prof.weblogicRedeploy || {};
     document.getElementById("profile-id-input").value = prof.id;
     document.getElementById("profile-name-input").value = prof.name;
     document.getElementById("profile-server-select").value = prof.serverId;
     document.getElementById("profile-form-title").textContent = `修改佈署設定 (${prof.id})`;
+
+    document.getElementById("profile-wl-enabled").checked = Boolean(wl.enabled);
+    document.getElementById("profile-wl-app").value = wl.appName || "";
+    document.getElementById("profile-wl-targets").value = wl.targets || "";
+    document.getElementById("profile-wl-timeout").value = String(wl.timeoutSeconds || 300);
+    document.getElementById("profile-wl-path").value = wl.redeployPath || DEFAULT_WL_PATH;
+    document.getElementById("profile-wl-body").value = wl.requestBodyJson || "";
+    toggleProfileWeblogicFields();
+
     state.fileDrafts = (prof.files || []).map((f) => ({
       id: f.id || "",
       localPath: f.localPath || "",
@@ -430,10 +552,25 @@
       return obj;
     });
 
+    const wlEnabled = document.getElementById("profile-wl-enabled").checked;
+    const wlApp = document.getElementById("profile-wl-app").value.trim();
+    const wlTargets = document.getElementById("profile-wl-targets").value.trim();
+    const wlTimeoutStr = document.getElementById("profile-wl-timeout").value.trim();
+    const wlPath = document.getElementById("profile-wl-path").value.trim() || DEFAULT_WL_PATH;
+    const wlBody = document.getElementById("profile-wl-body").value.trim();
+
     const payload = {
       name,
       serverId,
       files,
+      weblogicRedeploy: {
+        enabled: wlEnabled,
+        appName: wlApp,
+        targets: wlTargets,
+        timeoutSeconds: wlTimeoutStr ? Number(wlTimeoutStr) : 300,
+        redeployPath: wlPath,
+        requestBodyJson: wlBody,
+      },
     };
 
     try {
@@ -485,13 +622,18 @@
           ? `<strong>${escapeHtml(srv.name)}</strong><br/><code>${escapeHtml(srv.host)}:${escapeHtml(srv.port)}</code>`
           : `<span class="text-danger">未知 Server (${escapeHtml(prof.serverId)})</span>`;
 
+        const wl = prof.weblogicRedeploy || {};
+        const wlHtml = wl.enabled
+          ? `<div style="margin-top:4px;"><span class="status-pill status-running">WL Redeploy: ${escapeHtml(wl.appName)}</span></div>`
+          : "";
+
         return `
           <tr>
             <td>
               <strong>${escapeHtml(prof.name)}</strong><br/>
               <code>${escapeHtml(prof.id)}</code>
             </td>
-            <td>${srvHtml}</td>
+            <td>${srvHtml}${wlHtml}</td>
             <td><strong>${(prof.files || []).length}</strong> 筆</td>
             <td>
               <div style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -527,13 +669,17 @@
           ? `${srv.name} (${srv.host}:${srv.port} · ${srv.username})`
           : `未知 Server (${prof.serverId})`;
         const isRunning = Boolean(state.activeJobId);
+        const wl = prof.weblogicRedeploy || {};
+        const wlBadge = wl.enabled
+          ? ` · <span class="status-pill status-running">上傳後重啟 WL AP: ${escapeHtml(wl.appName)}</span>`
+          : "";
 
         return `
           <div class="profile-quick-card">
             <div>
               <h3>${escapeHtml(prof.name)}</h3>
               <div class="text-muted" style="font-size:12px;">
-                目標 Server：<code>${escapeHtml(srvText)}</code> · 共 <strong>${(prof.files || []).length}</strong> 筆檔案對應
+                目標 Server：<code>${escapeHtml(srvText)}</code> · 共 <strong>${(prof.files || []).length}</strong> 筆檔案對應${wlBadge}
               </div>
             </div>
             <div>
@@ -553,7 +699,7 @@
       .join("");
   }
 
-  // -------------------- 確認佈署與觸發工作 (SPEC 11.3, 11.4) --------------------
+  // -------------------- 確認佈署與觸發工作 (SPEC 11.3, 11.4, v1.1.0 第 7 章) --------------------
 
   function openConfirmDeployModal(profileId) {
     const prof = state.profiles.find((p) => p.id === profileId);
@@ -570,6 +716,21 @@
     document.getElementById("confirm-server-hostport").textContent = `${srv.host}:${srv.port}`;
     document.getElementById("confirm-server-user").textContent = srv.username;
     document.getElementById("confirm-file-count").textContent = String((prof.files || []).length);
+
+    const wl = prof.weblogicRedeploy || {};
+    const srvWl = srv.weblogic || {};
+    const wlNotice = document.getElementById("confirm-weblogic-notice");
+    const wlSummary = document.getElementById("confirm-wl-summary");
+
+    if (wl.enabled) {
+      wlNotice.classList.remove("hidden");
+      document.getElementById("confirm-wl-url").textContent = srvWl.adminUrl || "-";
+      document.getElementById("confirm-wl-app").textContent = wl.appName || "-";
+      wlSummary.innerHTML = `<span class="status-pill status-running">啟用 (${escapeHtml(wl.appName)})</span>`;
+    } else {
+      wlNotice.classList.add("hidden");
+      wlSummary.textContent = "未啟用";
+    }
 
     const tbody = document.getElementById("confirm-files-tbody");
     tbody.innerHTML = (prof.files || [])
@@ -681,6 +842,7 @@
     const doneCount =
       (job.successCount || 0) + (job.failedCount || 0) + (job.interruptedCount || 0);
     const uploadingFile = files.find((f) => f.status === "UPLOADING");
+    const wl = job.weblogicRedeploy || {};
 
     document.getElementById("job-meta-id").textContent = job.jobId || "-";
     document.getElementById("job-meta-profile").textContent = `${job.profileName || "-"} (${job.profileId || "-"})`;
@@ -688,6 +850,8 @@
     document.getElementById("job-meta-created").textContent = job.createdAt || "-";
     document.getElementById("job-meta-current-file").textContent = uploadingFile
       ? uploadingFile.localPath
+      : wl.enabled && wl.status === "RUNNING"
+      ? `正在執行 WebLogic Redeploy (${wl.appName})...`
       : job.status === "RUNNING" || job.status === "QUEUED"
       ? "準備中..."
       : "已結束";
@@ -722,6 +886,29 @@
         `;
       })
       .join("");
+
+    // WebLogic Redeploy 面板渲染
+    const wlSection = document.getElementById("job-weblogic-section");
+    if (wl && wl.enabled) {
+      wlSection.classList.remove("hidden");
+      document.getElementById("job-weblogic-status-badge").innerHTML = getStatusBadgeHtml(wl.status);
+      const errText = wl.error
+        ? `<div class="text-danger" style="margin-top:4px;"><strong>[${escapeHtml(wl.error.code)}]</strong> ${escapeHtml(wl.error.message)}</div>`
+        : "";
+      document.getElementById("job-weblogic-meta").innerHTML = `
+        <div>
+          <strong>Admin URL：</strong><code>${escapeHtml(wl.adminUrl || "-")}</code> ·
+          <strong>AP 名稱：</strong><code>${escapeHtml(wl.appName || "-")}</code> ·
+          <strong>Targets：</strong><code>${escapeHtml(wl.targets || "(沿用現有)")}</code>
+        </div>
+        ${errText}
+      `;
+      const logBox = document.getElementById("job-weblogic-log");
+      logBox.innerHTML = renderWeblogicLogsHtml(wl.logs);
+      logBox.scrollTop = logBox.scrollHeight;
+    } else {
+      wlSection.classList.add("hidden");
+    }
   }
 
   // -------------------- 歷史紀錄查詢 (SPEC 11.5) --------------------
@@ -757,6 +944,10 @@
     tbody.innerHTML = items
       .map((item) => {
         const srv = item.server || {};
+        const wl = item.weblogicRedeploy || {};
+        const wlHtml = wl.enabled
+          ? `<div style="margin-top:4px; font-size:12px;">WL (<code>${escapeHtml(wl.appName)}</code>): ${getStatusBadgeHtml(wl.status)}</div>`
+          : "";
         return `
           <tr>
             <td><code>${escapeHtml(item.jobId)}</code></td>
@@ -771,10 +962,13 @@
             <td>${escapeHtml(item.createdAt || "-")}</td>
             <td>${getStatusBadgeHtml(item.status)}</td>
             <td>
-              總數 <strong>${item.totalCount}</strong> /
-              成功 <strong style="color:var(--success)">${item.successCount}</strong> /
-              失敗 <strong style="color:var(--danger)">${item.failedCount}</strong> /
-              中斷 <strong>${item.interruptedCount}</strong>
+              <div>
+                總數 <strong>${item.totalCount}</strong> /
+                成功 <strong style="color:var(--success)">${item.successCount}</strong> /
+                失敗 <strong style="color:var(--danger)">${item.failedCount}</strong> /
+                中斷 <strong>${item.interruptedCount}</strong>
+              </div>
+              ${wlHtml}
             </td>
             <td>
               <button type="button" class="btn btn-sm btn-secondary" data-action="view-history-job" data-id="${escapeHtml(item.jobId)}">
@@ -826,9 +1020,111 @@
           `;
         })
         .join("");
+
+      const wl = job.weblogicRedeploy || {};
+      const wlSection = document.getElementById("history-detail-weblogic-section");
+      if (wl && wl.enabled) {
+        wlSection.classList.remove("hidden");
+        document.getElementById("history-detail-weblogic-badge").innerHTML = getStatusBadgeHtml(wl.status);
+        const errText = wl.error
+          ? `<div class="text-danger" style="margin-top:4px;"><strong>[${escapeHtml(wl.error.code)}]</strong> ${escapeHtml(wl.error.message)}</div>`
+          : "";
+        document.getElementById("history-detail-weblogic-meta").innerHTML = `
+          <div>
+            <strong>Admin URL：</strong><code>${escapeHtml(wl.adminUrl || "-")}</code> ·
+            <strong>AP 名稱：</strong><code>${escapeHtml(wl.appName || "-")}</code> ·
+            <strong>時間：</strong>${escapeHtml(wl.startedAt || "-")} ~ ${escapeHtml(wl.finishedAt || "-")}
+          </div>
+          ${errText}
+        `;
+        document.getElementById("history-detail-weblogic-log").innerHTML = renderWeblogicLogsHtml(wl.logs);
+      } else {
+        wlSection.classList.add("hidden");
+      }
+
       card.scrollIntoView({ behavior: "smooth" });
     } catch (err) {
       showToast("讀取歷史工作明細失敗：" + err.message, true);
+    }
+  }
+
+  // -------------------- 設定檔匯出與匯入 (SPEC v1.1.0 第 8 章) --------------------
+
+  async function handleExportConfig() {
+    try {
+      const data = await apiRequest("GET", "/api/config/export");
+      const jsonStr = JSON.stringify(data, null, 2);
+      const blob = new Blob([jsonStr], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const ts = (data.exportedAt || "").replace(/[:\s-]/g, "");
+      const filename = `sftp-deploy-config-${ts || "export"}.json`;
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast("已匯出整合設定檔：" + filename);
+    } catch (err) {
+      showToast("匯出設定失敗：" + err.message, true);
+    }
+  }
+
+  function openImportConfigModal() {
+    document.getElementById("import-file-input").value = "";
+    const mergeRadio = document.querySelector('input[name="import-mode-radio"][value="merge"]');
+    if (mergeRadio) mergeRadio.checked = true;
+    document.getElementById("import-config-modal").classList.remove("hidden");
+  }
+
+  function closeImportConfigModal() {
+    document.getElementById("import-config-modal").classList.add("hidden");
+  }
+
+  async function handleConfirmImportConfig() {
+    const fileInput = document.getElementById("import-file-input");
+    if (!fileInput.files || fileInput.files.length === 0) {
+      showToast("請先選擇要匯入的 JSON 設定檔。", true);
+      return;
+    }
+
+    const modeEl = document.querySelector('input[name="import-mode-radio"]:checked');
+    const mode = modeEl ? modeEl.value : "merge";
+
+    if (mode === "overwrite") {
+      if (!window.confirm("確定要以「整批覆蓋」模式匯入設定嗎？\n這將會完整替換目前所有的 Server 與佈署設定。")) {
+        return;
+      }
+    }
+
+    const file = fileInput.files[0];
+    let parsedData = null;
+    try {
+      const rawText = await file.text();
+      parsedData = JSON.parse(rawText);
+    } catch (err) {
+      showToast("讀取或解析 JSON 檔案失敗：" + err.message, true);
+      return;
+    }
+
+    const btn = document.getElementById("btn-confirm-import");
+    btn.disabled = true;
+    try {
+      const res = await apiRequest("POST", "/api/config/import", {
+        mode: mode,
+        data: parsedData,
+      });
+      closeImportConfigModal();
+      resetServerForm();
+      resetProfileForm();
+      await loadAllData();
+      showToast(res.message || "設定檔匯入成功！");
+    } catch (err) {
+      showToast("匯入設定失敗：" + err.message, true);
+    } finally {
+      btn.disabled = false;
     }
   }
 
@@ -859,7 +1155,12 @@
       btn.addEventListener("click", () => switchTab(btn.getAttribute("data-tab")));
     });
 
-    // 頂部退出按鈕
+    // 頂部匯出、匯入、退出按鈕
+    document.getElementById("btn-export-config").addEventListener("click", handleExportConfig);
+    document.getElementById("btn-open-import-modal").addEventListener("click", openImportConfigModal);
+    document.getElementById("btn-close-import-modal").addEventListener("click", closeImportConfigModal);
+    document.getElementById("btn-cancel-import").addEventListener("click", closeImportConfigModal);
+    document.getElementById("btn-confirm-import").addEventListener("click", handleConfirmImportConfig);
     document.getElementById("btn-shutdown").addEventListener("click", handleShutdownApp);
 
     // Tab 1: 重新整理快速列表
@@ -869,6 +1170,7 @@
     document.getElementById("btn-new-profile").addEventListener("click", resetProfileForm);
     document.getElementById("btn-reset-profile-form").addEventListener("click", resetProfileForm);
     document.getElementById("profile-server-select").addEventListener("change", updateSelectedServerPreview);
+    document.getElementById("profile-wl-enabled").addEventListener("change", toggleProfileWeblogicFields);
     document.getElementById("profile-form").addEventListener("submit", handleProfileFormSubmit);
 
     document.getElementById("btn-add-file-row").addEventListener("click", () => {
@@ -932,6 +1234,8 @@
 
       if (action === "test-server") {
         handleTestServerConnection(id, btn);
+      } else if (action === "test-weblogic") {
+        handleTestWeblogicConnection(id, btn);
       } else if (action === "edit-server") {
         editServerForm(id);
       } else if (action === "delete-server") {

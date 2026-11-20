@@ -90,15 +90,15 @@ def build_release() -> None:
 
     # 建立初始設定檔與 logs/deployments 目錄 (SPEC 5, 20.4)
     (target_pkg_dir / "appsettings.json").write_text(
-        json.dumps({"schemaVersion": 1, "httpPort": 18080}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps({"schemaVersion": 2, "httpPort": 18080}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     (target_pkg_dir / "servers.json").write_text(
-        json.dumps({"schemaVersion": 1, "servers": []}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps({"schemaVersion": 2, "servers": []}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     (target_pkg_dir / "deployments.json").write_text(
-        json.dumps({"schemaVersion": 1, "deploymentProfiles": []}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps({"schemaVersion": 2, "deploymentProfiles": []}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     (target_pkg_dir / "logs" / "deployments").mkdir(parents=True, exist_ok=True)
@@ -110,13 +110,13 @@ def build_release() -> None:
     examples_dir = target_pkg_dir / "examples"
     examples_dir.mkdir(parents=True, exist_ok=True)
     (examples_dir / "appsettings.example.json").write_text(
-        json.dumps({"schemaVersion": 1, "httpPort": 18080}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps({"schemaVersion": 2, "httpPort": 18080}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     (examples_dir / "servers.example.json").write_text(
         json.dumps(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "servers": [
                     {
                         "id": "server-test-01",
@@ -125,6 +125,12 @@ def build_release() -> None:
                         "port": 22,
                         "username": "deploy",
                         "passwordBase64": "dGVzdC1wYXNzd29yZA==",
+                        "weblogic": {
+                            "adminUrl": "http://fa5edapb:7001",
+                            "username": "system",
+                            "passwordBase64": "aWFtdGVzdGluZzEyMw==",
+                            "restVersion": "12.2.1.3.0",
+                        },
                     }
                 ],
             },
@@ -137,7 +143,7 @@ def build_release() -> None:
     (examples_dir / "deployments.example.json").write_text(
         json.dumps(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "deploymentProfiles": [
                     {
                         "id": "profile-test-app",
@@ -155,6 +161,14 @@ def build_release() -> None:
                                 "remotePath": "/opt/test-app/appsettings.json",
                             },
                         ],
+                        "weblogicRedeploy": {
+                            "enabled": False,
+                            "appName": "",
+                            "targets": "",
+                            "timeoutSeconds": 300,
+                            "redeployPath": "/management/weblogic/{version}/edit/appDeployments/{app}/redeploy",
+                            "requestBodyJson": "",
+                        },
                     }
                 ],
             },

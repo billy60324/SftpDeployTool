@@ -28,3 +28,5 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+temp/
+TEMP/

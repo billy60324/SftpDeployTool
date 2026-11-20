@@ -1,14 +1,21 @@
-"""定義設定檔模型、驗證規則與 API Request/Response 結構 (SPEC 6~9, 13~15)。"""
+"""定義設定檔模型、驗證規則、向下相容轉換與 API Request/Response 結構 (SPEC v1.1.0)。"""
 
 from __future__ import annotations
 
 import base64
+import json
 import re
 from typing import Any, Optional
 
 from app.errors import AppError, ErrorCode
 
 SUPPORTED_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = {1, 2}
+
+DEFAULT_WEBLOGIC_REST_VERSION = "12.2.1.3.0"
+DEFAULT_WEBLOGIC_REDEPLOY_PATH = "/management/weblogic/{version}/edit/appDeployments/{app}/redeploy"
+DEFAULT_WEBLOGIC_TIMEOUT_SECONDS = 300
 
 _DRIVE_ABS_RE = re.compile(r"^[a-zA-Z]:[\\/](?:[^\\/]+[\\/])*[^\\/]+$")
 _UNC_ABS_RE = re.compile(r"^\\\\[^\\/?*\"<>|]+\\[^\\/?*\"<>|]+(?:\\[^\\/?*\"<>|]+)+$")
@@ -17,6 +24,39 @@ _UNC_ABS_RE = re.compile(r"^\\\\[^\\/?*\"<>|]+\\[^\\/?*\"<>|]+(?:\\[^\\/?*\"<>|]
 def is_strict_int(val: Any) -> bool:
     """檢查是否為純整數（排除 Python 中 isinstance(True, int) 為 True 的情況）。"""
     return isinstance(val, int) and not isinstance(val, bool)
+
+
+def default_server_weblogic_config() -> dict[str, Any]:
+    """回傳預設空白的 Server WebLogic 設定結構（供舊版向下相容與預設初始化使用）。"""
+    return {
+        "adminUrl": "",
+        "username": "",
+        "passwordBase64": "",
+        "restVersion": DEFAULT_WEBLOGIC_REST_VERSION,
+    }
+
+
+def default_profile_weblogic_redeploy_config() -> dict[str, Any]:
+    """回傳預設未啟用的 Profile WebLogic Redeploy 設定結構（供舊版向下相容與預設初始化使用）。"""
+    return {
+        "enabled": False,
+        "appName": "",
+        "targets": "",
+        "timeoutSeconds": DEFAULT_WEBLOGIC_TIMEOUT_SECONDS,
+        "redeployPath": DEFAULT_WEBLOGIC_REDEPLOY_PATH,
+        "requestBodyJson": "",
+    }
+
+
+def is_server_weblogic_configured(wl: Optional[dict[str, Any]]) -> bool:
+    """檢查該 Server 的 WebLogic 連線設定是否已完整配置（URL、帳號、密碼皆存在）。"""
+    if not isinstance(wl, dict):
+        return False
+    return bool(
+        str(wl.get("adminUrl") or "").strip()
+        and str(wl.get("username") or "").strip()
+        and str(wl.get("passwordBase64") or "").strip()
+    )
 
 
 def encode_password_base64(password: str) -> str:
@@ -99,6 +139,209 @@ def validate_port(port: Any, field_name: str = "port") -> int:
             status_code=400,
         )
     return port
+
+
+def validate_admin_url(url: Any) -> str:
+    """驗證 WebLogic Admin Server URL，須以 http:// 或 https:// 開頭並移除結尾斜線。"""
+    if url is None:
+        return ""
+    if not isinstance(url, str):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            "WebLogic Admin Server URL 必須為字串。",
+            status_code=400,
+        )
+    cleaned = url.strip().rstrip("/")
+    if not cleaned:
+        return ""
+    if not (cleaned.startswith("http://") or cleaned.startswith("https://")):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"WebLogic Admin Server URL 必須以 http:// 或 https:// 開頭：{url}",
+            status_code=400,
+        )
+    if any(c.isspace() for c in cleaned):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            "WebLogic Admin Server URL 不得包含空白字元。",
+            status_code=400,
+        )
+    return cleaned
+
+
+def validate_server_weblogic_record(raw_wl: Any, srv_id: str = "") -> dict[str, Any]:
+    """
+    驗證並正規化單筆 Server 的 weblogic 設定區塊 (SPEC v1.1.0 5.2)。
+    若為 None 或未提供，自動補齊預設空結構（向下相容 v1.0.0）。
+    """
+    if raw_wl is None:
+        return default_server_weblogic_config()
+    if not isinstance(raw_wl, dict):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"Server ({srv_id}) 的 weblogic 欄位必須為 JSON 物件。",
+            status_code=400,
+        )
+
+    admin_url = validate_admin_url(raw_wl.get("adminUrl", ""))
+    username_raw = raw_wl.get("username", "")
+    if not isinstance(username_raw, str):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"Server ({srv_id}) 的 weblogic.username 必須為字串。",
+            status_code=400,
+        )
+    username = username_raw.strip()
+
+    rest_ver_raw = raw_wl.get("restVersion", DEFAULT_WEBLOGIC_REST_VERSION)
+    if not isinstance(rest_ver_raw, str):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"Server ({srv_id}) 的 weblogic.restVersion 必須為字串。",
+            status_code=400,
+        )
+    rest_version = rest_ver_raw.strip() or DEFAULT_WEBLOGIC_REST_VERSION
+
+    pw_b64_raw = raw_wl.get("passwordBase64", "")
+    if not isinstance(pw_b64_raw, str):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"Server ({srv_id}) 的 weblogic.passwordBase64 必須為字串。",
+            status_code=400,
+        )
+    pw_b64 = pw_b64_raw.strip()
+
+    if admin_url:
+        if not username:
+            raise AppError(
+                ErrorCode.CONFIG_INVALID,
+                f"Server ({srv_id}) 已填寫 WebLogic Admin Server URL 時，WebLogic 帳號為必填。",
+                status_code=400,
+            )
+        if not pw_b64:
+            raise AppError(
+                ErrorCode.CONFIG_INVALID,
+                f"Server ({srv_id}) 已填寫 WebLogic Admin Server URL 時，WebLogic 密碼為必填。",
+                status_code=400,
+            )
+        decode_password_base64(pw_b64)
+    else:
+        # 若未啟用/未填寫 adminUrl，但有殘留 passwordBase64 則仍驗證或允許清空
+        if pw_b64:
+            decode_password_base64(pw_b64)
+
+    return {
+        "adminUrl": admin_url,
+        "username": username,
+        "passwordBase64": pw_b64,
+        "restVersion": rest_version,
+    }
+
+
+def validate_profile_weblogic_redeploy_record(
+    raw_wl: Any,
+    prof_id: str = "",
+    server_weblogic_configured: bool = True,
+) -> dict[str, Any]:
+    """
+    驗證並正規化單筆 Profile 的 weblogicRedeploy 設定區塊 (SPEC v1.1.0 6.2)。
+    若為 None 或未提供，自動補齊預設 enabled=False 結構（向下相容 v1.0.0）。
+    """
+    if raw_wl is None:
+        return default_profile_weblogic_redeploy_config()
+    if not isinstance(raw_wl, dict):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"佈署設定 ({prof_id}) 的 weblogicRedeploy 欄位必須為 JSON 物件。",
+            status_code=400,
+        )
+
+    enabled = raw_wl.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"佈署設定 ({prof_id}) 的 weblogicRedeploy.enabled 必須為布林值。",
+            status_code=400,
+        )
+
+    app_name_raw = raw_wl.get("appName", "")
+    if not isinstance(app_name_raw, str):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"佈署設定 ({prof_id}) 的 weblogicRedeploy.appName 必須為字串。",
+            status_code=400,
+        )
+    app_name = app_name_raw.strip()
+
+    targets_raw = raw_wl.get("targets", "")
+    if not isinstance(targets_raw, str):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"佈署設定 ({prof_id}) 的 weblogicRedeploy.targets 必須為字串。",
+            status_code=400,
+        )
+    targets = targets_raw.strip()
+
+    timeout_raw = raw_wl.get("timeoutSeconds", DEFAULT_WEBLOGIC_TIMEOUT_SECONDS)
+    if timeout_raw is None:
+        timeout_raw = DEFAULT_WEBLOGIC_TIMEOUT_SECONDS
+    if not is_strict_int(timeout_raw) or timeout_raw < 10 or timeout_raw > 3600:
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"佈署設定 ({prof_id}) 的 WebLogic 等待逾時秒數 (timeoutSeconds) 必須為 10 到 3600 之間的整數。",
+            status_code=400,
+        )
+
+    redeploy_path_raw = raw_wl.get("redeployPath", DEFAULT_WEBLOGIC_REDEPLOY_PATH)
+    if not isinstance(redeploy_path_raw, str):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"佈署設定 ({prof_id}) 的 weblogicRedeploy.redeployPath 必須為字串。",
+            status_code=400,
+        )
+    redeploy_path = redeploy_path_raw.strip() or DEFAULT_WEBLOGIC_REDEPLOY_PATH
+
+    body_raw = raw_wl.get("requestBodyJson", "")
+    if not isinstance(body_raw, str):
+        raise AppError(
+            ErrorCode.CONFIG_INVALID,
+            f"佈署設定 ({prof_id}) 的 weblogicRedeploy.requestBodyJson 必須為字串。",
+            status_code=400,
+        )
+    request_body_json = body_raw.strip()
+
+    if request_body_json:
+        try:
+            json.loads(request_body_json)
+        except Exception as exc:
+            raise AppError(
+                ErrorCode.CONFIG_INVALID,
+                f"佈署設定 ({prof_id}) 的 WebLogic Request Body 不是合法的 JSON 格式：{exc}",
+                status_code=400,
+            ) from None
+
+    if enabled:
+        if not app_name:
+            raise AppError(
+                ErrorCode.CONFIG_INVALID,
+                f"佈署設定 ({prof_id}) 啟用 WebLogic Redeploy 時，AP 名稱 (appName) 為必填。",
+                status_code=400,
+            )
+        if not server_weblogic_configured:
+            raise AppError(
+                ErrorCode.CONFIG_INVALID,
+                f"佈署設定 ({prof_id}) 啟用了 WebLogic Redeploy，但所選的目標 Server 尚未設定 WebLogic Admin 連線資訊（URL、帳號、密碼）。",
+                status_code=400,
+            )
+
+    return {
+        "enabled": enabled,
+        "appName": app_name,
+        "targets": targets,
+        "timeoutSeconds": timeout_raw,
+        "redeployPath": redeploy_path,
+        "requestBodyJson": request_body_json,
+    }
 
 
 def validate_local_path(local_path: Any) -> str:
@@ -185,24 +428,24 @@ def validate_remote_path(remote_path: Any) -> str:
 
 
 def validate_appsettings_data(data: Any) -> dict[str, Any]:
-    """驗證 appsettings.json 結構 (SPEC 7.1)。"""
+    """驗證 appsettings.json 結構，向下相容 schemaVersion 1 與 2 (SPEC 4.1, 7.1)。"""
     if not isinstance(data, dict):
         raise AppError(ErrorCode.CONFIG_INVALID, "appsettings.json 必須為 JSON 物件。")
     schema_version = data.get("schemaVersion")
-    if not is_strict_int(schema_version) or schema_version != SUPPORTED_SCHEMA_VERSION:
+    if not is_strict_int(schema_version) or schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise AppError(
             ErrorCode.CONFIG_INVALID,
-            f"appsettings.json 的 schemaVersion 不支援或無效（僅支援 {SUPPORTED_SCHEMA_VERSION}）。",
+            f"appsettings.json 的 schemaVersion 不支援或無效（支援版本：{sorted(SUPPORTED_SCHEMA_VERSIONS)}）。",
         )
     http_port = validate_port(data.get("httpPort"), "httpPort")
     return {
-        "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+        "schemaVersion": schema_version,
         "httpPort": http_port,
     }
 
 
 def validate_server_record(raw: Any) -> dict[str, Any]:
-    """驗證單筆 Server 設定紀錄 (SPEC 8.2)。"""
+    """驗證單筆 Server 設定紀錄，並自動向下相容補齊 weblogic 欄位 (SPEC 5.2)。"""
     if not isinstance(raw, dict):
         raise AppError(ErrorCode.CONFIG_INVALID, "Server 項目必須為 JSON 物件。")
 
@@ -225,6 +468,8 @@ def validate_server_record(raw: Any) -> dict[str, Any]:
     # 驗證 Base64 可正常解碼為非空 UTF-8 字串
     decode_password_base64(password_b64)
 
+    weblogic_cfg = validate_server_weblogic_record(raw.get("weblogic"), srv_id=srv_id.strip())
+
     return {
         "id": srv_id.strip(),
         "name": name.strip(),
@@ -232,18 +477,19 @@ def validate_server_record(raw: Any) -> dict[str, Any]:
         "port": port,
         "username": username.strip(),
         "passwordBase64": password_b64.strip(),
+        "weblogic": weblogic_cfg,
     }
 
 
 def validate_servers_file_data(data: Any) -> dict[str, Any]:
-    """驗證 servers.json 結構與 ID 唯一性 (SPEC 6.2, 8.1, 8.2)。"""
+    """驗證 servers.json 結構與 ID 唯一性，支援 schemaVersion 1 與 2 (SPEC 4.1, 5.1)。"""
     if not isinstance(data, dict):
         raise AppError(ErrorCode.CONFIG_INVALID, "servers.json 必須為 JSON 物件。")
     schema_version = data.get("schemaVersion")
-    if not is_strict_int(schema_version) or schema_version != SUPPORTED_SCHEMA_VERSION:
+    if not is_strict_int(schema_version) or schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise AppError(
             ErrorCode.CONFIG_INVALID,
-            f"servers.json 的 schemaVersion 不支援或無效（僅支援 {SUPPORTED_SCHEMA_VERSION}）。",
+            f"servers.json 的 schemaVersion 不支援或無效（支援版本：{sorted(SUPPORTED_SCHEMA_VERSIONS)}）。",
         )
     servers_raw = data.get("servers")
     if not isinstance(servers_raw, list):
@@ -262,13 +508,17 @@ def validate_servers_file_data(data: Any) -> dict[str, Any]:
         validated_servers.append(srv)
 
     return {
-        "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+        "schemaVersion": CURRENT_SCHEMA_VERSION,
         "servers": validated_servers,
     }
 
 
-def validate_profile_record(raw: Any, valid_server_ids: set[str]) -> dict[str, Any]:
-    """驗證單筆 Deployment Profile 設定紀錄 (SPEC 9.2 ~ 9.5)。"""
+def validate_profile_record(
+    raw: Any,
+    valid_server_ids: set[str],
+    weblogic_configured_server_ids: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    """驗證單筆 Deployment Profile 設定紀錄，並自動向下相容補齊 weblogicRedeploy 欄位 (SPEC 6.1, 6.2)。"""
     if not isinstance(raw, dict):
         raise AppError(ErrorCode.CONFIG_INVALID, "佈署設定項目必須為 JSON 物件。")
 
@@ -332,23 +582,39 @@ def validate_profile_record(raw: Any, valid_server_ids: set[str]) -> dict[str, A
             }
         )
 
+    srv_wl_ok = (
+        True
+        if weblogic_configured_server_ids is None
+        else (server_id in weblogic_configured_server_ids)
+    )
+    weblogic_redeploy = validate_profile_weblogic_redeploy_record(
+        raw.get("weblogicRedeploy"),
+        prof_id=prof_id.strip(),
+        server_weblogic_configured=srv_wl_ok,
+    )
+
     return {
         "id": prof_id.strip(),
         "name": name.strip(),
         "serverId": server_id,
         "files": validated_files,
+        "weblogicRedeploy": weblogic_redeploy,
     }
 
 
-def validate_deployments_file_data(data: Any, valid_server_ids: set[str]) -> dict[str, Any]:
-    """驗證 deployments.json 結構與引用完整性 (SPEC 6.2, 9.1 ~ 9.5)。"""
+def validate_deployments_file_data(
+    data: Any,
+    valid_server_ids: set[str],
+    weblogic_configured_server_ids: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    """驗證 deployments.json 結構與引用完整性，支援 schemaVersion 1 與 2 (SPEC 4.1, 6.1)。"""
     if not isinstance(data, dict):
         raise AppError(ErrorCode.CONFIG_INVALID, "deployments.json 必須為 JSON 物件。")
     schema_version = data.get("schemaVersion")
-    if not is_strict_int(schema_version) or schema_version != SUPPORTED_SCHEMA_VERSION:
+    if not is_strict_int(schema_version) or schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise AppError(
             ErrorCode.CONFIG_INVALID,
-            f"deployments.json 的 schemaVersion 不支援或無效（僅支援 {SUPPORTED_SCHEMA_VERSION}）。",
+            f"deployments.json 的 schemaVersion 不支援或無效（支援版本：{sorted(SUPPORTED_SCHEMA_VERSIONS)}）。",
         )
     profiles_raw = data.get("deploymentProfiles")
     if not isinstance(profiles_raw, list):
@@ -360,7 +626,11 @@ def validate_deployments_file_data(data: Any, valid_server_ids: set[str]) -> dic
     seen_ids: set[str] = set()
     validated_profiles: list[dict[str, Any]] = []
     for item in profiles_raw:
-        prof = validate_profile_record(item, valid_server_ids)
+        prof = validate_profile_record(
+            item,
+            valid_server_ids=valid_server_ids,
+            weblogic_configured_server_ids=weblogic_configured_server_ids,
+        )
         if prof["id"] in seen_ids:
             raise AppError(
                 ErrorCode.CONFIG_INVALID,
@@ -370,6 +640,6 @@ def validate_deployments_file_data(data: Any, valid_server_ids: set[str]) -> dic
         validated_profiles.append(prof)
 
     return {
-        "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+        "schemaVersion": CURRENT_SCHEMA_VERSION,
         "deploymentProfiles": validated_profiles,
     }

@@ -25,14 +25,15 @@ from tests.conftest import EmbeddedSftpTestServer
 
 def wait_for_job_completion(client: TestClient, job_id: str, timeout: float = 10.0) -> dict[str, Any]:
     deadline = time.time() + timeout
+    last_data: Any = None
     while time.time() < deadline:
         resp = client.get(f"/api/deployments/{job_id}")
         assert resp.status_code == 200
-        data = resp.json()
-        if data["status"] not in ("QUEUED", "RUNNING"):
-            return data
+        last_data = resp.json()
+        if last_data["status"] not in ("QUEUED", "RUNNING"):
+            return last_data
         time.sleep(0.05)
-    raise TimeoutError(f"Job {job_id} did not finish within {timeout}s")
+    raise TimeoutError(f"Job {job_id} did not finish within {timeout}s; last_data={last_data}")
 
 
 def test_ac02_ui_static_resources_self_contained(tmp_path: Path) -> None:
@@ -887,5 +888,492 @@ def test_ac01_packaged_exe_runs_standalone(tmp_path: Path) -> None:
     finally:
         if orig_appsettings is not None:
             appsettings_path.write_text(orig_appsettings, encoding="utf-8")
+
+
+# ==================== v1.1.0 新增驗收測試 (AC-29 ~ AC-37) ====================
+
+
+def test_ac29_ac30_ui_traditional_chinese_and_table_styles(tmp_path: Path) -> None:
+    """
+    AC-29: UI 頁籤與所有介面文字均為繁體中文（無殘留簡體「与」字）。
+    AC-30: Server 清單的「帳號 / 密碼狀態」欄位與狀態膠囊標籤不會因寬度不足而異常折行。
+    """
+    app = create_app(base_dir=tmp_path / "app_dir")
+    client = TestClient(app)
+
+    html_text = client.get("/").text
+    assert "1. 觸發佈署與進度" in html_text
+    assert "執行時間與錯誤資訊" in html_text
+    assert "与" not in html_text
+
+    css_text = client.get("/static/styles.css").text
+    assert "white-space: nowrap;" in css_text
+
+    js_text = client.get("/static/app.js").text
+    assert "与" not in js_text
+
+
+def test_ac31_taiwan_timezone_and_timestamp_format(
+    tmp_path: Path, sftp_server: EmbeddedSftpTestServer
+) -> None:
+    """
+    AC-31: 新產生的工作紀錄與日誌時間皆為台灣時區 (UTC+8)，且格式為 yyyy-mm-dd hh24:mi:ss。
+    """
+    import re
+    from datetime import datetime, timedelta, timezone
+
+    base_dir = tmp_path / "app_dir"
+    app = create_app(base_dir=base_dir)
+    client = TestClient(app)
+
+    (sftp_server.root_dir / "opt").mkdir(parents=True, exist_ok=True)
+    src_file = tmp_path / "tz_test.txt"
+    src_file.write_text("timezone test", encoding="utf-8")
+
+    srv_id = client.post(
+        "/api/servers",
+        json={
+            "name": "TZ Server",
+            "host": sftp_server.host,
+            "port": sftp_server.port,
+            "username": sftp_server.username,
+            "password": sftp_server.password,
+        },
+    ).json()["id"]
+
+    prof_id = client.post(
+        "/api/profiles",
+        json={
+            "name": "TZ Profile",
+            "serverId": srv_id,
+            "files": [{"localPath": str(src_file), "remotePath": "/opt/tz_test.txt"}],
+        },
+    ).json()["id"]
+
+    tw_tz = timezone(timedelta(hours=8))
+    before_tw = datetime.now(tw_tz).replace(microsecond=0)
+
+    dep_resp = client.post("/api/deployments", json={"profileId": prof_id})
+    assert dep_resp.status_code == 202
+    job_id = dep_resp.json()["jobId"]
+    job_res = wait_for_job_completion(client, job_id)
+
+    after_tw = datetime.now(tw_tz).replace(microsecond=0) + timedelta(seconds=2)
+
+    ts_pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+    for field in ("createdAt", "startedAt", "finishedAt"):
+        val = job_res[field]
+        assert isinstance(val, str) and ts_pattern.match(val), f"{field}={val} 不符合 yyyy-mm-dd hh24:mi:ss 格式"
+        parsed_dt = datetime.strptime(val, "%Y-%m-%d %H:%M:%S").replace(tzinfo=tw_tz)
+        assert before_tw <= parsed_dt <= after_tw
+
+    f_item = job_res["files"][0]
+    assert ts_pattern.match(f_item["startedAt"])
+    assert ts_pattern.match(f_item["finishedAt"])
+
+
+def test_ac32_config_export_and_import_overwrite_and_merge(tmp_path: Path) -> None:
+    """
+    AC-32: 可匯出單一整合設定 JSON 檔，並支援以「整批覆蓋 (overwrite)」或「合併 (merge)」模式匯入還原。
+    """
+    dir_a = tmp_path / "instance_a"
+    client_a = TestClient(create_app(base_dir=dir_a))
+
+    srv1 = client_a.post(
+        "/api/servers",
+        json={
+            "name": "Server 1",
+            "host": "10.0.0.1",
+            "port": 22,
+            "username": "user1",
+            "password": "pw1",
+            "weblogic": {
+                "adminUrl": "http://wl1:7001",
+                "username": "system",
+                "password": "wlpw1",
+                "restVersion": "12.2.1.3.0",
+            },
+        },
+    ).json()
+
+    prof1 = client_a.post(
+        "/api/profiles",
+        json={
+            "name": "Profile 1",
+            "serverId": srv1["id"],
+            "files": [{"localPath": "C:\\Build\\a.ear", "remotePath": "/opt/a.ear"}],
+            "weblogicRedeploy": {
+                "enabled": True,
+                "appName": "App1_EAR",
+                "targets": "AdminServer",
+            },
+        },
+    ).json()
+
+    # 匯出設定檔
+    exp_resp = client_a.get("/api/config/export")
+    assert exp_resp.status_code == 200
+    exported_data = exp_resp.json()
+    assert exported_data["exportType"] == "SftpDeployToolConfig"
+    assert exported_data["schemaVersion"] == 2
+    assert len(exported_data["servers"]) == 1
+    assert len(exported_data["deploymentProfiles"]) == 1
+    assert exported_data["servers"][0]["passwordBase64"] != ""
+    assert exported_data["servers"][0]["weblogic"]["passwordBase64"] != ""
+
+    # 建立第二個環境 dir_b，先新增一筆既有 Server B 與 Profile B
+    dir_b = tmp_path / "instance_b"
+    client_b = TestClient(create_app(base_dir=dir_b))
+    srv_b = client_b.post(
+        "/api/servers",
+        json={
+            "name": "Existing Server B",
+            "host": "10.0.0.2",
+            "port": 2222,
+            "username": "userb",
+            "password": "pwb",
+        },
+    ).json()
+    prof_b = client_b.post(
+        "/api/profiles",
+        json={
+            "name": "Existing Profile B",
+            "serverId": srv_b["id"],
+            "files": [{"localPath": "C:\\Build\\b.dll", "remotePath": "/opt/b.dll"}],
+        },
+    ).json()
+
+    # 1. 測試 merge 合併模式：保留 Server B / Profile B，並加入匯入的 Server 1 / Profile 1
+    imp_merge = client_b.post(
+        "/api/config/import",
+        json={"mode": "merge", "data": exported_data},
+    )
+    assert imp_merge.status_code == 200
+    assert imp_merge.json()["serverCount"] == 2
+    assert imp_merge.json()["profileCount"] == 2
+
+    # 2. 測試 overwrite 整批覆蓋模式：只留下匯入的 Server 1 / Profile 1
+    imp_overwrite = client_b.post(
+        "/api/config/import",
+        json={"mode": "overwrite", "data": exported_data},
+    )
+    assert imp_overwrite.status_code == 200
+    assert imp_overwrite.json()["serverCount"] == 1
+    assert imp_overwrite.json()["profileCount"] == 1
+    final_profiles = client_b.get("/api/profiles").json()["deploymentProfiles"]
+    assert final_profiles[0]["id"] == prof1["id"]
+    assert final_profiles[0]["weblogicRedeploy"]["enabled"] is True
+    assert final_profiles[0]["weblogicRedeploy"]["appName"] == "App1_EAR"
+
+
+def test_ac33_ac34_ac35_ac36_weblogic_connection_and_redeploy_workflow(
+    tmp_path: Path, sftp_server: EmbeddedSftpTestServer
+) -> None:
+    """
+    AC-33: Server 可配置 WebLogic Admin 連線資訊並執行 WebLogic REST 連線測試。
+    AC-34: 佈署設定啟用 WebLogic Redeploy 時，當所有檔案 SFTP 上傳成功後自動呼叫 WebLogic Redeploy API 並輪詢結果、記錄日誌。
+    AC-35: 佈署設定啟用 WebLogic Redeploy 時，若任一檔案 SFTP 上傳失敗，自動略過 (SKIPPED) WebLogic Redeploy，不重啟 AP。
+    AC-36: 若 SFTP 檔案全數成功但 WebLogic Redeploy 失敗，整體工作狀態標記為 PARTIALLY_SUCCEEDED 並保留失敗原因與日誌。
+    """
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    wl_state = {
+        "auth_header": "Basic " + base64.b64encode("system:iamtesting123".encode("utf-8")).decode("ascii"),
+        "redeploy_calls": [],
+        "poll_count": 0,
+        "force_redeploy_fail": False,
+    }
+
+    class MockWebLogicHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            if self.headers.get("Authorization") != wl_state["auth_header"]:
+                self._send_json(401, {"error": "Unauthorized"})
+                return
+            if "/deploymentProgressObjects/job-1" in self.path:
+                wl_state["poll_count"] += 1
+                if wl_state["poll_count"] < 2:
+                    self._send_json(200, {"state": "STATE_RUNNING", "progress": "processing"})
+                elif wl_state["force_redeploy_fail"]:
+                    self._send_json(
+                        200,
+                        {"state": "STATE_FAILED", "progress": "failed", "messages": ["Deploy error"]},
+                    )
+                else:
+                    self._send_json(200, {"state": "STATE_COMPLETED", "progress": "success"})
+                return
+            if "/domainRuntime" in self.path:
+                self._send_json(200, {"name": "TestDomain"})
+                return
+            self._send_json(404, {"error": "Not found"})
+
+        def do_POST(self) -> None:
+            if self.headers.get("Authorization") != wl_state["auth_header"]:
+                self._send_json(401, {"error": "Unauthorized"})
+                return
+            if self.headers.get("X-Requested-By") != "weblogic-redeploy-tool":
+                self._send_json(400, {"error": "Missing X-Requested-By"})
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            raw_body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+            wl_state["redeploy_calls"].append({"path": self.path, "body": json.loads(raw_body)})
+            wl_state["poll_count"] = 0
+            self._send_json(
+                202,
+                {
+                    "state": "STATE_RUNNING",
+                    "links": [
+                        {
+                            "rel": "job",
+                            "href": f"http://127.0.0.1:{self.server.server_port}/management/weblogic/12.2.1.3.0/domainRuntime/deploymentManager/deploymentProgressObjects/job-1",
+                        }
+                    ],
+                },
+            )
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), MockWebLogicHandler)
+    wl_port = httpd.server_port
+    wl_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    wl_thread.start()
+
+    try:
+        base_dir = tmp_path / "app_dir"
+        store = ConfigStore(base_dir)
+        store.initialize_and_load()
+
+        # 縮短測試時的輪詢間隔為 0.05 秒以加速測試執行
+        from app.weblogic_client import run_weblogic_redeploy
+
+        def fast_wl_runner(**kwargs: Any):
+            kwargs["poll_interval_seconds"] = 0.05
+            return run_weblogic_redeploy(**kwargs)
+
+        jobs = JobManager(store, weblogic_redeploy_runner=fast_wl_runner)
+        app = create_app(base_dir=base_dir, config_store=store, job_manager=jobs)
+        client = TestClient(app)
+
+        # AC-33: 建立含 WebLogic 設定的 Server 並測試 WebLogic 連線
+        srv_resp = client.post(
+            "/api/servers",
+            json={
+                "name": "SFTP + WebLogic Server",
+                "host": sftp_server.host,
+                "port": sftp_server.port,
+                "username": sftp_server.username,
+                "password": sftp_server.password,
+                "weblogic": {
+                    "adminUrl": f"http://127.0.0.1:{wl_port}/",
+                    "username": "system",
+                    "password": "iamtesting123",
+                    "restVersion": "12.2.1.3.0",
+                },
+            },
+        )
+        assert srv_resp.status_code == 201
+        srv_id = srv_resp.json()["id"]
+        assert srv_resp.json()["weblogic"]["configured"] is True
+
+        wl_test_resp = client.post(f"/api/servers/{srv_id}/test-weblogic")
+        assert wl_test_resp.status_code == 200
+        assert "TestDomain" in wl_test_resp.json()["message"]
+
+        # 準備本機 EAR 檔案與遠端目錄
+        (sftp_server.root_dir / "opt" / "wl").mkdir(parents=True, exist_ok=True)
+        ear_file = tmp_path / "PMCForcastSystemEAR.ear"
+        ear_file.write_bytes(b"EAR_BINARY_CONTENT")
+
+        prof_resp = client.post(
+            "/api/profiles",
+            json={
+                "name": "Deploy EAR & Redeploy WL",
+                "serverId": srv_id,
+                "files": [
+                    {
+                        "localPath": str(ear_file),
+                        "remotePath": "/opt/wl/PMCForcastSystemEAR.ear",
+                    }
+                ],
+                "weblogicRedeploy": {
+                    "enabled": True,
+                    "appName": "PMCForcastSystemEAR_7015",
+                    "targets": "AdminServer,Cluster1",
+                    "timeoutSeconds": 60,
+                },
+            },
+        )
+        assert prof_resp.status_code == 201
+        prof_id = prof_resp.json()["id"]
+
+        # AC-34: SFTP 全部成功 -> 自動觸發 WebLogic Redeploy 並輪詢完成 -> 整體 SUCCEEDED
+        job1_id = client.post("/api/deployments", json={"profileId": prof_id}).json()["jobId"]
+        job1_res = wait_for_job_completion(client, job1_id)
+        assert job1_res["status"] == "SUCCEEDED"
+        assert job1_res["weblogicRedeploy"]["status"] == "SUCCEEDED"
+        assert len(wl_state["redeploy_calls"]) == 1
+        assert (
+            wl_state["redeploy_calls"][0]["path"]
+            == "/management/weblogic/12.2.1.3.0/edit/appDeployments/PMCForcastSystemEAR_7015/redeploy"
+        )
+        assert wl_state["redeploy_calls"][0]["body"] == {"targets": ["AdminServer", "Cluster1"]}
+        assert any("Redeploy 完成" in lg["message"] for lg in job1_res["weblogicRedeploy"]["logs"])
+
+        # AC-36: SFTP 檔案成功，但 WebLogic Redeploy 失敗 -> 整體 PARTIALLY_SUCCEEDED
+        wl_state["force_redeploy_fail"] = True
+        job2_id = client.post("/api/deployments", json={"profileId": prof_id}).json()["jobId"]
+        job2_res = wait_for_job_completion(client, job2_id)
+        assert job2_res["status"] == "PARTIALLY_SUCCEEDED"
+        assert job2_res["successCount"] == 1
+        assert job2_res["weblogicRedeploy"]["status"] == "FAILED"
+        assert job2_res["weblogicRedeploy"]["error"]["code"] == ErrorCode.WEBLOGIC_REDEPLOY_FAILED
+
+        # AC-35: 任一檔案 SFTP 上傳失敗 -> 自動略過 (SKIPPED) WebLogic Redeploy，不發送 POST
+        wl_state["force_redeploy_fail"] = False
+        prev_call_count = len(wl_state["redeploy_calls"])
+        missing_file = tmp_path / "missing.ear"
+        prof_fail_sftp = client.post(
+            "/api/profiles",
+            json={
+                "name": "Fail SFTP Skip WL",
+                "serverId": srv_id,
+                "files": [
+                    {"localPath": str(ear_file), "remotePath": "/opt/wl/ok.ear"},
+                    {"localPath": str(missing_file), "remotePath": "/opt/wl/missing.ear"},
+                ],
+                "weblogicRedeploy": {
+                    "enabled": True,
+                    "appName": "PMCForcastSystemEAR_7015",
+                },
+            },
+        ).json()["id"]
+
+        job3_id = client.post("/api/deployments", json={"profileId": prof_fail_sftp}).json()["jobId"]
+        job3_res = wait_for_job_completion(client, job3_id)
+        assert job3_res["status"] == "PARTIALLY_SUCCEEDED"
+        assert job3_res["weblogicRedeploy"]["status"] == "SKIPPED"
+        assert len(wl_state["redeploy_calls"]) == prev_call_count  # 確認未呼叫 WebLogic API
+    finally:
+        httpd.shutdown()
+
+
+def test_ac37_backward_compatibility_with_v1_configs_and_logs(tmp_path: Path) -> None:
+    """
+    AC-37: 新版程式可直接載入 v1.0.0 (schemaVersion: 1) 的 appsettings.json、servers.json、deployments.json 與舊版歷史紀錄檔而不報錯。
+    """
+    base_dir = tmp_path / "v1_legacy_dir"
+    logs_dir = base_dir / "logs" / "deployments"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    (base_dir / "appsettings.json").write_text(
+        json.dumps({"schemaVersion": 1, "httpPort": 18088}),
+        encoding="utf-8",
+    )
+    pw_b64 = base64.b64encode(b"legacy-pass").decode("ascii")
+    (base_dir / "servers.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "servers": [
+                    {
+                        "id": "srv-legacy-01",
+                        "name": "舊版 Server",
+                        "host": "192.168.1.10",
+                        "port": 22,
+                        "username": "root",
+                        "passwordBase64": pw_b64,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (base_dir / "deployments.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "deploymentProfiles": [
+                    {
+                        "id": "prof-legacy-01",
+                        "name": "舊版 Profile",
+                        "serverId": "srv-legacy-01",
+                        "files": [
+                            {
+                                "id": "f-01",
+                                "localPath": "C:\\Build\\legacy.dll",
+                                "remotePath": "/opt/legacy.dll",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (logs_dir / "job-20261019T083000Z-legacy.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "jobId": "job-20261019T083000Z-legacy",
+                "profileId": "prof-legacy-01",
+                "profileName": "舊版 Profile",
+                "server": {
+                    "id": "srv-legacy-01",
+                    "name": "舊版 Server",
+                    "host": "192.168.1.10",
+                    "port": 22,
+                    "username": "root",
+                },
+                "createdAt": "2026-10-19T08:30:00Z",
+                "startedAt": "2026-10-19T08:30:01Z",
+                "finishedAt": "2026-10-19T08:30:05Z",
+                "status": "SUCCEEDED",
+                "totalCount": 1,
+                "successCount": 1,
+                "failedCount": 0,
+                "interruptedCount": 0,
+                "files": [
+                    {
+                        "id": "f-01",
+                        "localPath": "C:\\Build\\legacy.dll",
+                        "remotePath": "/opt/legacy.dll",
+                        "sizeBytes": 512,
+                        "status": "SUCCEEDED",
+                        "startedAt": "2026-10-19T08:30:01Z",
+                        "finishedAt": "2026-10-19T08:30:05Z",
+                        "error": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    app = create_app(base_dir=base_dir)
+    client = TestClient(app)
+
+    servers = client.get("/api/servers").json()["servers"]
+    assert len(servers) == 1
+    assert servers[0]["id"] == "srv-legacy-01"
+    assert servers[0]["weblogic"]["configured"] is False
+
+    profiles = client.get("/api/profiles").json()["deploymentProfiles"]
+    assert len(profiles) == 1
+    assert profiles[0]["id"] == "prof-legacy-01"
+    assert profiles[0]["weblogicRedeploy"]["enabled"] is False
+
+    legacy_job = client.get("/api/deployments/job-20261019T083000Z-legacy").json()
+    assert legacy_job["status"] == "SUCCEEDED"
+    assert legacy_job["weblogicRedeploy"]["enabled"] is False
+
 
 

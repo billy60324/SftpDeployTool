@@ -71,7 +71,7 @@ body {
 .topbar-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 /* Tabs */
@@ -121,7 +121,7 @@ body {
 
 .grid-two-col {
   display: grid;
-  grid-template-columns: 1fr 1.25fr;
+  grid-template-columns: 1.05fr 1.2fr;
   gap: 20px;
   align-items: start;
 }
@@ -175,6 +175,7 @@ body {
   border: 1px solid transparent;
   cursor: pointer;
   transition: all 0.15s ease;
+  white-space: nowrap;
 }
 
 .btn:disabled {
@@ -204,6 +205,17 @@ body {
 
 .btn-secondary:hover:not(:disabled) {
   background-color: #e2e8f0;
+}
+
+.btn-topbar {
+  background-color: #1e293b;
+  color: #e2e8f0;
+  border-color: #334155;
+}
+
+.btn-topbar:hover:not(:disabled) {
+  background-color: #334155;
+  color: #ffffff;
 }
 
 .btn-danger {
@@ -249,6 +261,7 @@ body {
   background-color: #f8fafc;
   font-weight: 600;
   color: #475569;
+  white-space: nowrap;
 }
 
 .data-table tr:hover td {
@@ -302,6 +315,8 @@ label {
 input[type="text"],
 input[type="number"],
 input[type="password"],
+input[type="file"],
+textarea,
 select {
   width: 100%;
   padding: 8px 10px;
@@ -309,9 +324,17 @@ select {
   border-radius: 6px;
   font-size: 13px;
   font-family: inherit;
+  background: #ffffff;
+  color: var(--text-main);
+}
+
+textarea {
+  font-family: Consolas, "Courier New", monospace;
+  resize: vertical;
 }
 
 input:focus,
+textarea:focus,
 select:focus {
   outline: none;
   border-color: var(--primary);
@@ -338,6 +361,70 @@ select:focus {
   border: 1px solid var(--border-color);
   border-radius: 6px;
   font-size: 12px;
+}
+
+/* Sub-panel for WebLogic settings */
+.sub-panel {
+  margin-top: 14px;
+  padding: 14px;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+}
+
+.sub-panel-title {
+  font-weight: 700;
+  font-size: 13.5px;
+  margin-bottom: 4px;
+  color: #0f172a;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  margin-bottom: 0;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.advanced-details {
+  margin-top: 8px;
+  border-top: 1px dashed #cbd5e1;
+  padding-top: 8px;
+}
+
+.advanced-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--primary);
+}
+
+.advanced-details .details-body {
+  margin-top: 10px;
+}
+
+.radio-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  margin-top: 8px;
+  cursor: pointer;
+  background: #f8fafc;
+  font-weight: 400;
+}
+
+.radio-option input[type="radio"] {
+  margin-top: 4px;
 }
 
 /* File mapping row */
@@ -398,7 +485,7 @@ select:focus {
   font-size: 15px;
 }
 
-/* Status pills */
+/* Status pills (AC-30: white-space: nowrap 防止折行) */
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -407,6 +494,7 @@ select:focus {
   border-radius: 999px;
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .status-neutral {
@@ -482,6 +570,41 @@ select:focus {
   height: 100%;
   background: linear-gradient(90deg, #2563eb, #16a34a);
   transition: width 0.25s ease;
+}
+
+/* WebLogic Terminal Log (對標 weblogic-redeploy.html) */
+.weblogic-result-panel {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color);
+}
+
+.wl-terminal-log {
+  background: #11161c;
+  color: #d6dde5;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font: 12px/1.5 Consolas, "Courier New", monospace;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.wl-terminal-log .err {
+  color: #ff8a80;
+}
+
+.wl-terminal-log .ok {
+  color: #81c784;
+}
+
+.wl-terminal-log .info {
+  color: #90caf9;
+}
+
+.wl-terminal-log .dim {
+  color: #8b98a5;
 }
 
 /* Alerts & Toast */
